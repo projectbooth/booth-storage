@@ -1,0 +1,21 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Node / frontend
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/coverage/
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local env files (never commit credentials)
+.env
+.env.*
+!.env.example
