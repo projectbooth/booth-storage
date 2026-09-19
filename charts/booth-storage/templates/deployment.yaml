@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "booth-storage.fullname" . }}
+  labels:
+    {{- include "booth-storage.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "booth-storage.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "booth-storage.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "booth-storage.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: booth-storage
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BOOTH_HTTP_ADDR
+              value: ":8080"
+            # Credential Secrets are written to this pod's own namespace (ADR 0020).
+            - name: BOOTH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: BOOTH_OIDC_ISSUER_URL
+              value: {{ .Values.oidc.issuerUrl | quote }}
+            - name: BOOTH_OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            - name: BOOTH_OIDC_REQUIRE_AUDIENCE
+              value: {{ .Values.oidc.requireAudience | quote }}
+            - name: BOOTH_OIDC_GROUPS_CLAIM
+              value: {{ .Values.oidc.groupsClaim | quote }}
+            - name: BOOTH_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "postgres.dsnSecret.name is required: booth-storage keeps backend metadata in PostgreSQL (ADR 0014)" .Values.postgres.dsnSecret.name }}
+                  key: {{ .Values.postgres.dsnSecret.key }}
+            {{- with .Values.filesystem.roots }}
+            - name: BOOTH_STORAGE_FILESYSTEM_ROOTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.maxUploadBytes }}
+            - name: BOOTH_STORAGE_MAX_UPLOAD_BYTES
+              value: {{ .Values.maxUploadBytes | int64 | quote }}
+            {{- end }}
+          # /livez does not look at the database on purpose: restarting the pod cannot fix
+          # a Postgres outage. /healthz (readiness, and what core polls) does.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.filesystem.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.filesystem.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,77 @@
+# Default values for booth-storage.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/projectbooth/booth-storage
+  tag: "" # defaults to Chart.appVersion; overridden by CI to the published tag (contracts/testing-strategy.md)
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8080
+
+oidc:
+  # Required: same OIDC issuer/client every module verifies against independently
+  # (core-platform-api.md's defense-in-depth requirement). Left empty by default.
+  issuerUrl: ""
+  clientId: ""
+  requireAudience: true
+  # The token claim carrying workspace memberships (ADR 0025). booth-storage re-derives the
+  # caller's role from it rather than trusting the gateway-forwarded X-Booth-Role, so it MUST
+  # match booth-core's BOOTH_OIDC_GROUPS_CLAIM.
+  groupsClaim: groups
+
+# Backend metadata (which backends exist, how they're configured — never credentials)
+# lives in this module's own database on the shared PostgreSQL cluster (ADR 0014).
+# Reference an existing Secret holding the connection string; this chart does not create
+# the database or role.
+postgres:
+  dsnSecret:
+    name: ""
+    key: dsn
+
+# Credentials for each registered backend are stored as Kubernetes Secrets in the
+# release namespace (ADR 0020: booth-storage is the granting module). The Role below
+# grants exactly get/create/update/delete on Secrets in this one namespace, so install
+# this chart into a namespace dedicated to booth-storage — anything else that keeps
+# Secrets there is readable by this module's service account.
+rbac:
+  create: true
+
+# The filesystem backend kind is OFF unless roots are listed. Registering a filesystem
+# backend means "let a workspace owner point storage at a directory on this server", so
+# the operator decides which directories are shareable.
+#
+# A root containing {workspace} expands per workspace: "/data/{workspace}" lets workspace
+# "acme" reach /data/acme/... and nothing else. A root without it is shared by every
+# workspace (fine for a single-tenant install; a deliberate choice otherwise).
+filesystem:
+  roots: []
+  # Volumes/mounts that make those directories exist inside the pod. The image runs as
+  # uid/gid 65532 with a read-only root filesystem, so mounted volumes must be writable
+  # by that user (see podSecurityContext.fsGroup).
+  volumes: []
+  volumeMounts: []
+
+# Cap on a single object write, in bytes. 0 = unlimited.
+maxUploadBytes: 0
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources: {}
+
+serviceAccount:
+  create: true
+  name: ""

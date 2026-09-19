@@ -1,0 +1,10 @@
+.git
+.github
+bin
+web
+charts
+docs
+hack
+test
+**/*_test.go
+*.md

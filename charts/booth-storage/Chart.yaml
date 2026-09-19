@@ -1,0 +1,9 @@
+apiVersion: v2
+name: booth-storage
+description: >
+  Project Booth's storage module: register multiple S3-compatible, filesystem, Azure Blob
+  and GCS backends per workspace, and expose a generic read/write/list API over them.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/projectbooth/booth-storage

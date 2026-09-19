@@ -1,0 +1,32 @@
+# Registers booth-storage with booth-core's module registry (ADR 0019): the BoothModule
+# CRD is the only thing core reads to know this module exists
+# (contracts/module-manifest.md). Uses booth-core's own CRD type
+# (booth.projectbooth.io/v1alpha1), which that chart installs — not redefined here.
+#
+# navPath is the regular view every role sees (browse/select registered backends);
+# adminNavPath is the distinct owner-only view for registering, editing and removing
+# backends and their credentials (ADR 0023, ADR 0036).
+apiVersion: booth.projectbooth.io/v1alpha1
+kind: BoothModule
+metadata:
+  name: storage
+  labels:
+    {{- include "booth-storage.labels" . | nindent 4 }}
+spec:
+  id: storage
+  displayName: Storage
+  icon: drive
+  version: {{ .Chart.AppVersion | quote }}
+  contractVersion: "0.1.0"
+  hasOwnUi: true
+  uiIntegrationMode: native
+  navGroup: manage
+  navPath: /storage
+  adminNavPath: /storage/admin
+  healthCheckPath: /healthz
+  requiredScopes:
+    - storage.read
+    - storage.write
+  serviceRef:
+    name: {{ include "booth-storage.fullname" . }}
+    port: {{ .Values.service.port }}

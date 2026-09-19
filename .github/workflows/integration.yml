@@ -1,0 +1,112 @@
+name: Integration
+
+# Layer 3 (contracts/testing-strategy.md, ADR 0024): real-cluster integration tests. Runs
+# on merge to main and nightly, not on every push/PR — it's the slower "actually deployed
+# to a real cluster" layer. See test/integration/README.md for exactly what this covers
+# and what's still missing: deploying alongside a real, pinned booth-core release (a build
+# exists as of booth-core v0.1.1, but pulling it needs a cross-repo credential; not wired up
+# yet). NOTE: this workflow has not been executed yet — no kind/k3d was available when it
+# was written; it was linted with actionlint and its Go test compiles. Expect to shake out
+# first-run issues.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 8 * * *" # nightly
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kind-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: booth-storage-ci
+
+      - uses: azure/setup-helm@v4
+
+      - name: Build and load booth-storage image
+        run: |
+          docker build -t booth-storage:ci .
+          kind load docker-image booth-storage:ci --name booth-storage-ci
+
+      - name: Install vendored BoothModule CRD (see test/integration/fixtures)
+        run: kubectl apply -f test/integration/fixtures/boothmodule-crd.yaml
+
+      - name: Deploy a PostgreSQL for the module's database (ADR 0014)
+        run: |
+          kubectl create namespace booth-storage
+          kubectl apply -n booth-storage -f test/integration/fixtures/postgres.yaml
+          kubectl -n booth-storage rollout status deployment/postgres --timeout=180s
+
+      - name: Install booth-storage chart
+        working-directory: charts/booth-storage
+        run: |
+          helm install booth-storage . \
+            --namespace booth-storage \
+            --set image.repository=booth-storage \
+            --set image.tag=ci \
+            --set image.pullPolicy=Never \
+            --set oidc.issuerUrl=https://accounts.google.com \
+            --set oidc.clientId=booth-storage-ci \
+            --set oidc.requireAudience=false \
+            --set postgres.dsnSecret.name=booth-storage-db \
+            --set 'filesystem.roots[0]=/data/{workspace}' \
+            --wait --timeout 5m
+
+      - name: Verify rollout and registration (ADR 0019)
+        run: |
+          kubectl -n booth-storage get pods
+          kubectl -n booth-storage rollout status deployment/booth-storage --timeout=120s
+          kubectl -n booth-storage get boothmodules.booth.projectbooth.io storage -o yaml
+          # Both views must be declared on the live resource (ADR 0036).
+          test "$(kubectl -n booth-storage get boothmodules.booth.projectbooth.io storage -o jsonpath='{.spec.navPath}')" = "/storage"
+          test "$(kubectl -n booth-storage get boothmodules.booth.projectbooth.io storage -o jsonpath='{.spec.adminNavPath}')" = "/storage/admin"
+
+      - name: Verify /healthz through the Service (a 200 means migrations ran and Postgres is reachable)
+        run: |
+          kubectl -n booth-storage run curl-check --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -sf http://booth-storage.booth-storage.svc.cluster.local:8080/healthz
+
+      - name: Verify the API refuses unauthenticated requests in-cluster
+        run: |
+          # `kubectl run --rm` appends its own "pod deleted" line, so match rather than compare.
+          kubectl -n booth-storage run curl-authz --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -s -o /dev/null -w 'status=%{http_code}' http://booth-storage.booth-storage.svc.cluster.local:8080/api/backends \
+            | grep -q 'status=401'
+
+      - name: Verify RBAC is exactly what ADR 0020 needs, and no more
+        run: |
+          sa="system:serviceaccount:booth-storage:booth-storage"
+          allowed() { test "$(kubectl auth can-i "$@" --as="$sa")" = "yes" || { echo "unexpectedly DENIED: $*"; exit 1; }; }
+          denied()  { test "$(kubectl auth can-i "$@" --as="$sa")" = "no"  || { echo "unexpectedly ALLOWED: $*"; exit 1; }; }
+
+          for verb in get create update delete; do
+            allowed "$verb" secrets -n booth-storage
+          done
+          # Nothing beyond that: no listing/watching secrets, nothing in other namespaces.
+          denied list secrets -n booth-storage
+          denied watch secrets -n booth-storage
+          denied get secrets -n kube-system
+          denied create secrets -n kube-system
+          denied get pods -n booth-storage
+
+      - name: Credential Secrets provision on a real API server (ADR 0020)
+        env:
+          BOOTH_IT_NAMESPACE: booth-storage
+        run: go test -tags integration -count=1 -v ./test/integration/...
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          kubectl -n booth-storage get all
+          kubectl -n booth-storage logs deployment/booth-storage --tail=200 || true

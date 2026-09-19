@@ -1,0 +1,126 @@
+name: CI
+
+# Layers 1-2 (contracts/testing-strategy.md, ADR 0024): unit + contract tests. No cluster
+# needed — but the backend tests DO run against real MinIO, Azurite and PostgreSQL
+# containers (hack/docker-compose.emulators.yml, the same file used locally), because the
+# S3/Azure/Postgres code paths are only meaningfully exercised against the real thing.
+# Runs on every push and PR; branch protection on main requires every job here to pass
+# before merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: azure/setup-helm@v4 # needed by test/contract's `helm template` checks
+
+      - name: Verify gofmt
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: Start MinIO, Azurite and PostgreSQL
+        run: docker compose -f hack/docker-compose.emulators.yml up -d --wait
+
+      - name: Unit + contract tests
+        env:
+          # A missing emulator must fail the build, never silently skip its tests green.
+          BOOTH_TEST_REQUIRE_EMULATORS: "1"
+        run: |
+          eval "$(hack/test-env.sh)"
+          go test -race -count=1 ./...
+
+      - name: Emulator logs on failure
+        if: failure()
+        run: docker compose -f hack/docker-compose.emulators.yml logs --tail=100
+
+  web-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test -- --run
+
+      - name: Build
+        run: npm run build
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: helm lint
+        working-directory: charts/booth-storage
+        run: |
+          helm lint . \
+            --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
+            --set oidc.clientId=booth-storage \
+            --set postgres.dsnSecret.name=booth-storage-db
+
+      - name: helm template (render check, with the filesystem kind enabled)
+        working-directory: charts/booth-storage
+        run: |
+          helm template booth-storage . \
+            --namespace booth-storage \
+            --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
+            --set oidc.clientId=booth-storage \
+            --set postgres.dsnSecret.name=booth-storage-db \
+            --set 'filesystem.roots[0]=/data/{workspace}' > /dev/null
+
+  image-build:
+    # Catches a broken Dockerfile on the PR that breaks it, not at release time. Not pushed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false

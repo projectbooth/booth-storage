@@ -1,0 +1,46 @@
+# Local stand-ins for the external services the backend + registry tests talk to. CI runs
+# the same images (see .github/workflows/ci.yml), so a green local run means the same
+# thing a green CI run does. Not used at runtime — this is test tooling only.
+#
+#   docker compose -f hack/docker-compose.emulators.yml up -d --wait
+#   eval "$(hack/test-env.sh)"        # export the BOOTH_TEST_* variables (bash/zsh)
+#   go test ./...
+#   docker compose -f hack/docker-compose.emulators.yml down -v
+#
+# GCS needs no container: its tests use fake-gcs-server in-process.
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: booth-test
+      MINIO_ROOT_PASSWORD: booth-test-secret
+    ports: ["19000:9000"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+    ports: ["10000:10000"]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 10000"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: booth
+      POSTGRES_PASSWORD: booth-test
+      POSTGRES_DB: booth_storage_test
+    ports: ["15432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booth -d booth_storage_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

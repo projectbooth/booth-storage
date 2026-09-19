@@ -1,0 +1,31 @@
+{{- if .Values.rbac.create }}
+# ADR 0020: booth-storage is the "granting module" that provisions each registered
+# backend's credentials as a Kubernetes Secret. That needs Secret access — deliberately
+# limited to this one namespace (a Role, not a ClusterRole) and to the four verbs used.
+# It does NOT get list/watch: the module only ever addresses a Secret by its derived name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "booth-storage.fullname" . }}
+  labels:
+    {{- include "booth-storage.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "booth-storage.fullname" . }}
+  labels:
+    {{- include "booth-storage.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "booth-storage.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "booth-storage.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
