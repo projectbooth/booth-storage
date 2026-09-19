@@ -1,0 +1,7 @@
+/* Library entry stylesheet (@projectbooth/module-store-ui) — deliberately excludes
+   `@tailwind base` (Tailwind's global reset/preflight). Shipping a second global
+   reset from a dependency would fight with booth-design's own base styles once
+   mounted in its shell. The dev harness (src/styles.css, used only by src/main.tsx)
+   keeps the full reset, since it runs standalone with no host page providing one. */
+@tailwind components;
+@tailwind utilities;
