@@ -54,7 +54,7 @@ jobs:
           # A missing emulator must fail the build, never silently skip its tests green.
           BOOTH_TEST_REQUIRE_EMULATORS: "1"
         run: |
-          eval "$(hack/test-env.sh)"
+          eval "$(sh hack/test-env.sh)"
           go test -race -count=1 ./...
 
       - name: Emulator logs on failure
