@@ -24,6 +24,12 @@ var writeTests = map[string]func(*testing.T, backend.Backend){
 	"MoveFolderMovesWholeTree":       moveFolderMovesWholeTree,
 	"MoveFolderNeverClobbers":        moveFolderNeverClobbers,
 	"MoveFolderEdgeCases":            moveFolderEdgeCases,
+
+	// Requests that treat a file as if it were a folder (found live by booth-e2e: a
+	// prefix= listing against a file 502'd on the filesystem kind). Every kind must answer
+	// these the way a flat-key store naturally does: nothing there, not a server error.
+	"ListPrefixNamingAFileIsEmpty": listPrefixNamingAFileIsEmpty,
+	"ReadThroughAFileIsNotFound":   readThroughAFileIsNotFound,
 }
 
 func dirEntries(t *testing.T, b backend.Backend, prefix string) map[string]bool {
@@ -295,5 +301,47 @@ func moveFolderEdgeCases(t *testing.T, b backend.Backend) {
 	mustWrite(t, b, "file.txt", "f")
 	if err := b.MoveFolder(ctx(t), "file.txt", "elsewhere"); !errors.Is(err, backend.ErrNotFound) {
 		t.Errorf("MoveFolder(file) = %v, want ErrNotFound", err)
+	}
+}
+
+func listPrefixNamingAFileIsEmpty(t *testing.T, b backend.Backend) {
+	mustWrite(t, b, "hello.txt", "hi")
+	mustWrite(t, b, "dir/real.txt", "x")
+
+	for _, prefix := range []string{"hello.txt", "hello.txt/", "hello.txt/sub", "dir/real.txt"} {
+		for _, recursive := range []bool{false, true} {
+			res, err := b.List(ctx(t), backend.ListOptions{Prefix: prefix, Recursive: recursive})
+			if err != nil {
+				t.Errorf("List(prefix %q, recursive=%v) = error %v; a prefix naming a file must list as empty, not fail", prefix, recursive, err)
+				continue
+			}
+			if len(res.Entries) != 0 {
+				t.Errorf("List(prefix %q, recursive=%v) = %v, want nothing (a prefix is a folder boundary, and this names a file)", prefix, recursive, paths(res.Entries))
+			}
+		}
+	}
+	// The file and its neighbours are untouched, and listing the real folder still works.
+	if data, _ := readAll(t, b, "hello.txt"); string(data) != "hi" {
+		t.Error("hello.txt damaged")
+	}
+	if got := dirEntries(t, b, "dir"); len(got) != 1 {
+		t.Errorf("dir listing = %v, want exactly dir/real.txt", got)
+	} else if isDir, ok := got["dir/real.txt"]; !ok || isDir {
+		t.Errorf("dir listing = %v, want dir/real.txt as a file", got)
+	}
+}
+
+func readThroughAFileIsNotFound(t *testing.T, b backend.Backend) {
+	mustWrite(t, b, "report.csv", "x")
+	for _, p := range []string{"report.csv/inner.txt", "report.csv/a/b.txt"} {
+		if _, _, err := b.Read(ctx(t), p); !errors.Is(err, backend.ErrNotFound) {
+			t.Errorf("Read(%q) = %v, want ErrNotFound (a path through a file has nothing at it)", p, err)
+		}
+		if err := b.DeleteObject(ctx(t), p); !errors.Is(err, backend.ErrNotFound) {
+			t.Errorf("DeleteObject(%q) = %v, want ErrNotFound", p, err)
+		}
+	}
+	if data, _ := readAll(t, b, "report.csv"); string(data) != "x" {
+		t.Error("report.csv damaged")
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/projectbooth/booth-storage/internal/backend"
 )
@@ -131,7 +132,7 @@ func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend
 	dir := path.Dir(clean)
 	if dir != "." {
 		if err := mkdirAll(root, dir); err != nil {
-			return backend.ObjectInfo{}, mapErr(err)
+			return backend.ObjectInfo{}, mapWriteErr(err)
 		}
 	}
 
@@ -143,7 +144,7 @@ func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend
 	}
 	tmp, err := root.OpenFile(filepath.FromSlash(tmpName), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
 	if err != nil {
-		return backend.ObjectInfo{}, mapErr(err)
+		return backend.ObjectInfo{}, mapWriteErr(err)
 	}
 	cleanupTmp := func() {
 		tmp.Close()
@@ -192,6 +193,22 @@ func (b *Backend) List(ctx context.Context, opts backend.ListOptions) (backend.L
 		startDir = "."
 	}
 
+	// A prefix is a directory boundary, so a prefix that names a *file* (or sits beneath one)
+	// has nothing under it — exactly what an object store answers for the same request.
+	// Without this check the walk would list the file itself, and a directory read on a file
+	// fails with "readdirent: not a directory", which surfaced to clients as a 502.
+	if startDir != "." {
+		st, serr := root.Stat(filepath.FromSlash(startDir))
+		switch {
+		case serr != nil && (errors.Is(serr, fs.ErrNotExist) || isNotDir(serr)):
+			return backend.ListResult{Entries: []backend.ObjectInfo{}}, nil
+		case serr != nil:
+			return backend.ListResult{}, mapErr(serr)
+		case !st.IsDir():
+			return backend.ListResult{Entries: []backend.ObjectInfo{}}, nil
+		}
+	}
+
 	// Collect limit+1 entries: the extra one only tells us whether another page exists.
 	var entries []backend.ObjectInfo
 	full := func() bool { return len(entries) > limit }
@@ -202,8 +219,8 @@ func (b *Backend) List(ctx context.Context, opts backend.ListOptions) (backend.L
 		err = listDir(root, startDir, prefix, opts.Cursor, &entries, full)
 	}
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return backend.ListResult{}, nil // nothing under this prefix — not an error
+		if errors.Is(err, fs.ErrNotExist) || isNotDir(err) {
+			return backend.ListResult{Entries: []backend.ObjectInfo{}}, nil // nothing under this prefix — not an error
 		}
 		return backend.ListResult{}, mapErr(err)
 	}
@@ -234,7 +251,7 @@ func (b *Backend) Mkdir(ctx context.Context, p string) error {
 	defer root.Close()
 
 	if err := mkdirAll(root, dir); err != nil {
-		return mapErr(err)
+		return mapWriteErr(err)
 	}
 	// mkdirAll ignores "already exists", which is also what a *file* in the way reports.
 	if st, err := root.Stat(filepath.FromSlash(dir)); err != nil || !st.IsDir() {
@@ -352,7 +369,7 @@ func (b *Backend) move(src, dst string, wantDir bool) error {
 	}
 	if parent := path.Dir(dst); parent != "." {
 		if err := mkdirAll(root, parent); err != nil {
-			return mapErr(err)
+			return mapWriteErr(err)
 		}
 	}
 	return mapErr(root.Rename(filepath.FromSlash(src), filepath.FromSlash(dst)))
@@ -486,8 +503,18 @@ func mkdirAll(root *os.Root, dir string) error {
 	var built string
 	for _, seg := range strings.Split(dir, "/") {
 		built = path.Join(built, seg)
-		if err := root.Mkdir(filepath.FromSlash(built), 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
-			return err
+		if err := root.Mkdir(filepath.FromSlash(built), 0o750); err != nil {
+			if !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+			// "Already exists" is only fine if what exists is a directory. A *file* in the
+			// way is a conflict the caller can fix; report it as ENOTDIR so every caller (and
+			// every platform) sees the same thing, instead of failing later and obscurely.
+			if st, serr := root.Stat(filepath.FromSlash(built)); serr != nil {
+				return serr
+			} else if !st.IsDir() {
+				return syscall.ENOTDIR
+			}
 		}
 	}
 	return nil
@@ -520,7 +547,9 @@ func mapErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, fs.ErrNotExist), isNotDir(err):
+		// isNotDir: a path *through a file* ("report.csv/x"). There is nothing there, which is
+		// what an object store answers too — a client-shaped miss (404), not a server fault.
 		return backend.ErrNotFound
 	case strings.Contains(err.Error(), "path escapes from parent"):
 		// os.Root refused to follow a symlink (or ..) out of the root.
@@ -529,6 +558,20 @@ func mapErr(err error) error {
 		return err
 	}
 }
+
+// mapWriteErr is mapErr for operations that create things. A file sitting where a folder
+// is needed ("report.csv/x" when report.csv is a file) is a conflict the caller can fix,
+// not "not found": there is no way to create the path without removing the file.
+func mapWriteErr(err error) error {
+	if err != nil && isNotDir(err) {
+		return fmt.Errorf("%w: a file exists where a folder is needed", backend.ErrConflict)
+	}
+	return mapErr(err)
+}
+
+// isNotDir reports ENOTDIR: a directory operation on something that isn't a directory, or a
+// path component that is a file.
+func isNotDir(err error) bool { return errors.Is(err, syscall.ENOTDIR) }
 
 // ctxReader aborts an in-progress copy when the request's context is cancelled, so an
 // abandoned upload doesn't keep writing to disk.
