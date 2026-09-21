@@ -63,7 +63,7 @@ export const KIND_DEFS: Record<BackendKind, KindDef> = {
         label: "Root directory",
         required: true,
         placeholder: "/data/my-workspace/scratch",
-        help: "Absolute path. Must be inside a directory your platform operator has made available.",
+        help: "Absolute path, inside a directory your platform operator has made available. If it doesn't exist yet it is created, provided its parent directory exists.",
       },
     ],
     credentialFields: [],

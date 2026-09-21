@@ -491,7 +491,8 @@ func TestService_TestConnection(t *testing.T) {
 	if err := e.svc.Test(testCtx, "acme", CreateInput{Kind: backend.KindFilesystem, Config: fsConfig(good)}); err != nil {
 		t.Errorf("Test of a working backend: %v", err)
 	}
-	missing := filepath.Join(e.fsRoot, "acme", "does-not-exist")
+	// The parent is missing too, so this cannot be created (see fsroot_test.go for the creatable case).
+	missing := filepath.Join(e.fsRoot, "acme", "no-such-parent", "does-not-exist")
 	if err := e.svc.Test(testCtx, "acme", CreateInput{Kind: backend.KindFilesystem, Config: fsConfig(missing)}); err == nil {
 		t.Error("Test of a nonexistent directory succeeded")
 	}

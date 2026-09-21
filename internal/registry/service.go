@@ -101,6 +101,14 @@ func (s *Service) Create(ctx context.Context, workspace, actor string, in Create
 	if err := validateCredentials(in.Kind, in.Credentials); err != nil {
 		return Record{}, err
 	}
+	// A filesystem backend's directory must be usable *now*: a bad path is a 4xx here rather
+	// than a 502 on every later read and write. A missing leaf (with an existing parent) is
+	// created; see checkFilesystemRoot for why only the leaf.
+	if in.Kind == backend.KindFilesystem {
+		if _, err := checkFilesystemRoot(cfg, true); err != nil {
+			return Record{}, err
+		}
+	}
 	// Build (without contacting the service) to catch combinations the field-level
 	// checks can't see, e.g. an Azure backend with no credential at all.
 	if _, err := buildBackend(in.Kind, cfg, in.Credentials, workspace, s.fsPolicy); err != nil {
@@ -200,6 +208,11 @@ func (s *Service) Update(ctx context.Context, workspace, id string, in UpdateInp
 	if err != nil {
 		return Record{}, err
 	}
+	if p.rec.Kind == backend.KindFilesystem && len(in.Config) > 0 {
+		if _, err := checkFilesystemRoot(p.rec.Config, true); err != nil {
+			return Record{}, err
+		}
+	}
 
 	// Credentials first: if the metadata write then fails, the worst case is a Secret
 	// that's newer than the record, which the next successful update reconciles.
@@ -227,6 +240,15 @@ func (s *Service) TestUpdate(ctx context.Context, workspace, id string, in Updat
 	p, err := s.prepareUpdate(ctx, workspace, id, in)
 	if err != nil {
 		return err
+	}
+	if p.rec.Kind == backend.KindFilesystem && len(in.Config) > 0 {
+		st, err := checkFilesystemRoot(p.rec.Config, false) // testing never creates anything
+		if err != nil {
+			return asTestFailure(err)
+		}
+		if st == rootWillBeCreated {
+			return nil // it doesn't exist yet, but saving will create it
+		}
 	}
 	b, err := buildBackend(p.rec.Kind, p.rec.Config, p.creds, workspace, s.fsPolicy)
 	if err != nil {
@@ -322,6 +344,15 @@ func (s *Service) Test(ctx context.Context, workspace string, in CreateInput) er
 	if err := validateCredentials(in.Kind, in.Credentials); err != nil {
 		return err
 	}
+	if in.Kind == backend.KindFilesystem {
+		st, err := checkFilesystemRoot(cfg, false) // testing never creates anything
+		if err != nil {
+			return asTestFailure(err)
+		}
+		if st == rootWillBeCreated {
+			return nil // it doesn't exist yet, but saving will create it
+		}
+	}
 	b, err := buildBackend(in.Kind, cfg, in.Credentials, workspace, s.fsPolicy)
 	if err != nil {
 		return invalid("", "%v", err)
@@ -336,6 +367,18 @@ func (s *Service) TestSaved(ctx context.Context, workspace, id string) error {
 		return err
 	}
 	return b.Check(ctx)
+}
+
+// asTestFailure turns a root-directory validation problem into a plain error. Registering
+// refuses such a path with a 4xx, but *testing* one is a question ("would this work?") whose
+// honest answer is "no, because ...", which the API reports as a failed connection rather than
+// a malformed request — the same way an unreachable bucket is reported.
+func asTestFailure(err error) error {
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return errors.New(ve.Message)
+	}
+	return err
 }
 
 func (s *Service) invalidate(workspace, id string) {

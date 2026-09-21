@@ -344,7 +344,7 @@ func TestAdminLifecycle(t *testing.T) {
 	if !tr.OK {
 		t.Errorf("saved backend test failed: %+v", tr)
 	}
-	r = e.do(t, alice, "POST", "/api/admin/backends/scratch/test", map[string]any{"config": map[string]string{"rootPath": filepath.Join(e.fsRoot, "acme", "missing-dir")}})
+	r = e.do(t, alice, "POST", "/api/admin/backends/scratch/test", map[string]any{"config": map[string]string{"rootPath": filepath.Join(e.fsRoot, "acme", "no-such-parent", "missing-dir")}})
 	expect(t, r, 200)
 	r.json(t, &tr)
 	if tr.OK || tr.Error == "" {
@@ -470,7 +470,7 @@ func TestTestConnectionResults(t *testing.T) {
 	}
 
 	// A connectivity failure is a normal answer (200, ok=false), not an API error.
-	r = e.do(t, alice, "POST", "/api/admin/test-connection", map[string]any{"kind": "filesystem", "config": map[string]string{"rootPath": filepath.Join(e.fsRoot, "acme", "nope")}})
+	r = e.do(t, alice, "POST", "/api/admin/test-connection", map[string]any{"kind": "filesystem", "config": map[string]string{"rootPath": filepath.Join(e.fsRoot, "acme", "no-such-parent", "nope")}})
 	expect(t, r, 200)
 	tr = TestResult{}
 	r.json(t, &tr)
