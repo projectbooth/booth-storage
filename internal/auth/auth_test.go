@@ -237,6 +237,19 @@ func TestVerifier_WorkloadIssuerDownAtStartup(t *testing.T) {
 	}
 }
 
+func TestVerifier_WorkloadIssuerTrailingSlash(t *testing.T) {
+	idp := newFakeIdP(t)
+	core := newFakeCore(t)
+	ctx := context.Background()
+	v, err := NewVerifier(ctx, OIDCConfig{IssuerURL: idp.server.URL, ClientID: "booth-storage", WorkloadIssuerURL: core.server.URL + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(ctx, core.token(t, tokenOpts{subject: "job:1"})); err != nil {
+		t.Errorf("workload token refused when the issuer is configured with a trailing slash: %v", err)
+	}
+}
+
 func TestNewVerifier_WorkloadIssuerMustDifferFromIdP(t *testing.T) {
 	idp := newFakeIdP(t)
 	if _, err := NewVerifier(context.Background(), OIDCConfig{IssuerURL: idp.server.URL, WorkloadIssuerURL: idp.server.URL}); err == nil {

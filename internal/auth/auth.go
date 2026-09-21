@@ -109,13 +109,14 @@ func NewVerifier(ctx context.Context, cfg OIDCConfig) (*Verifier, error) {
 		byIssuer:    map[string]*oidc.IDTokenVerifier{cfg.IssuerURL: provider.Verifier(verifierConfig)},
 		groupsClaim: claim,
 	}
-	if wl := cfg.WorkloadIssuerURL; wl != "" {
+	// Core strips a trailing slash from its issuer URL, so match that form in `iss`.
+	if wl := strings.TrimRight(cfg.WorkloadIssuerURL, "/"); wl != "" {
 		if wl == cfg.IssuerURL {
 			return nil, fmt.Errorf("the workload issuer must differ from the OIDC issuer (both %s)", wl)
 		}
 		// Keys are fetched lazily, on the first workload token: booth-core may not be up yet
 		// when this module starts, and that must not stop it serving human tokens.
-		keys := oidc.NewRemoteKeySet(ctx, strings.TrimRight(wl, "/")+workloadJWKSPath)
+		keys := oidc.NewRemoteKeySet(ctx, wl+workloadJWKSPath)
 		v.byIssuer[wl] = oidc.NewVerifier(wl, keys, verifierConfig)
 	}
 	return v, nil
