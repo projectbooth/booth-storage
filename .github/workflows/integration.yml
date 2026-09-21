@@ -59,7 +59,6 @@ jobs:
             --set oidc.issuerUrl=https://accounts.google.com \
             --set oidc.clientId=booth-storage-ci \
             --set oidc.requireAudience=false \
-            --set postgres.dsnSecret.name=booth-storage-db \
             --set 'filesystem.roots[0]=/data/{workspace}' \
             --wait --timeout 5m
 
@@ -71,6 +70,10 @@ jobs:
           # Both views must be declared on the live resource (ADR 0036).
           test "$(kubectl -n booth-storage get boothmodules.booth.projectbooth.io storage -o jsonpath='{.spec.navPath}')" = "/storage"
           test "$(kubectl -n booth-storage get boothmodules.booth.projectbooth.io storage -o jsonpath='{.spec.adminNavPath}')" = "/storage/admin"
+          # ADR 0053/0054: the live resource must ask booth-core for a database. (If the vendored
+          # CRD didn't know the field the API server would silently drop it, so this also guards
+          # against the fixture going stale.)
+          test "$(kubectl -n booth-storage get boothmodules.booth.projectbooth.io storage -o jsonpath='{.spec.database.enabled}')" = "true"
 
       - name: Verify /healthz through the Service (a 200 means migrations ran and Postgres is reachable)
         run: |

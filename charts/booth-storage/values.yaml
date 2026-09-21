@@ -23,10 +23,21 @@ oidc:
 
 # Backend metadata (which backends exist, how they're configured — never credentials)
 # lives in this module's own database on the shared PostgreSQL cluster (ADR 0014).
-# Reference an existing Secret holding the connection string; this chart does not create
-# the database or role.
+#
+# By default booth-core provisions that database (ADR 0053/0054): the BoothModule manifest
+# declares `database: {enabled: true}`, and core creates a database and unprivileged role for
+# this module and delivers them as the Secret `booth-database-credentials` (key `dsn`) in this
+# release's namespace. There is nothing to create by hand. The pod may sit in
+# CreateContainerConfigError for a moment after install until core has written the Secret.
+#
+# To use your own database instead (no booth-core provisioning), set provisionedByCore to
+# false and name a Secret holding the connection string in dsnSecret. This chart never
+# creates the database, role or Secret itself.
 postgres:
+  provisionedByCore: true
   dsnSecret:
+    # Empty means "booth-database-credentials" when provisionedByCore is true; required
+    # (no default) when it is false.
     name: ""
     key: dsn
 
@@ -47,6 +58,11 @@ rbac:
 # workspace (fine for a single-tenant install; a deliberate choice otherwise).
 filesystem:
   roots: []
+  # A registered directory that doesn't exist yet is created if its PARENT exists (so with
+  # roots like /data/{workspace}, mounting /data is enough); if the parent is missing too,
+  # registration is refused. Only the leaf is created — a volume that failed to mount must be
+  # a loud error, not a silently-created directory on the container's ephemeral disk.
+  #
   # Volumes/mounts that make those directories exist inside the pod. The image runs as
   # uid/gid 65532 with a read-only root filesystem, so mounted volumes must be writable
   # by that user (see podSecurityContext.fsGroup).

@@ -32,6 +32,17 @@ app.kubernetes.io/name: {{ include "booth-storage.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+The Secret holding the database connection string: core's, or the operator's own.
+*/}}
+{{- define "booth-storage.dsnSecretName" -}}
+{{- if .Values.postgres.provisionedByCore -}}
+{{- default "booth-database-credentials" .Values.postgres.dsnSecret.name -}}
+{{- else -}}
+{{- required "postgres.dsnSecret.name is required when postgres.provisionedByCore=false: name the Secret holding your database connection string (ADR 0014)" .Values.postgres.dsnSecret.name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "booth-storage.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "booth-storage.fullname" .) .Values.serviceAccount.name -}}

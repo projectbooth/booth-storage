@@ -2,12 +2,13 @@
 # booth.projectbooth.io_boothmodules.yaml, ADR 0019). We don't own this type — core
 # does — but our real-cluster integration test needs it present in the kind cluster to
 # apply our own chart's BoothModule instance (templates/boothmodule.yaml), including its
-# adminNavPath field (ADR 0023/0036).
+# adminNavPath (ADR 0023/0036) and database (ADR 0053) fields — a CRD copy that doesn't know a
+# field silently PRUNES it, which would make the assertions on it in integration.yml meaningless.
 #
 # This is a stopgap until booth-core publishes a pinned, referenceable build our CI can
 # install CRDs from directly (contracts/testing-strategy.md's "booth-core should publish a
 # versioned, referenceable build other repos' CI can pin to"). Keep this in sync with
-# booth-core's CRD by hand until then.
+# booth-core's CRD by hand until then. Re-vendored 2026-09-21 to pick up `database` (ADR 0053).
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -78,10 +79,52 @@ spec:
                   ContractVersion is the module-manifest.md + core-platform-api.md contract
                   version this module targets. Core supports current and previous major.
                 type: string
+              database:
+                description: |-
+                  Database signals that this module needs its own PostgreSQL database (ADR 0053).
+                  Core then creates a database and role scoped to this module on the shared cluster and
+                  delivers the connection details as a Secret in the module's namespace, ahead of the
+                  module needing them. Omit it and the module gets nothing. Core provisions the
+                  database only; what a module puts in it (schema, migrations) is the module's own.
+                  Proposed manifest addition, pending an architecture ADR (see
+                  docs/decisions/0008-shared-postgres.md).
+                properties:
+                  enabled:
+                    description: Enabled requests a database for this module.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               displayName:
                 description: DisplayName is the human-readable name shown in the shell
                   UI.
                 type: string
+              events:
+                description: |-
+                  Events declares which event-bus subjects this module may publish and subscribe to
+                  (ADR 0049). Core derives the module's NATS credentials — and their per-subject
+                  publish permissions — from exactly this, and provisions them as a Secret in the
+                  module's namespace. A module that omits it gets no bus credentials at all, i.e. it
+                  cannot connect to the bus. Proposed manifest addition, pending an architecture ADR
+                  (see docs/decisions/0006-event-bus-authentication.md).
+                properties:
+                  publish:
+                    description: Publish lists event types this module may publish.
+                    items:
+                      pattern: ^[a-z][a-z0-9]*(\.([a-z][a-z0-9]*|\*))+$
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  subscribe:
+                    description: |-
+                      Subscribe lists event types this module consumes. Grants access to the
+                      JetStream consumer API for the shared events stream.
+                    items:
+                      pattern: ^[a-z][a-z0-9]*(\.([a-z][a-z0-9]*|\*))+$
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
               hasOwnUi:
                 description: HasOwnUI declares whether this module ships a UI to surface
                   in the shell.

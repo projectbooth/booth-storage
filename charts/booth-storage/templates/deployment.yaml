@@ -45,7 +45,7 @@ spec:
             - name: BOOTH_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "postgres.dsnSecret.name is required: booth-storage keeps backend metadata in PostgreSQL (ADR 0014)" .Values.postgres.dsnSecret.name }}
+                  name: {{ include "booth-storage.dsnSecretName" . }}
                   key: {{ .Values.postgres.dsnSecret.key }}
             {{- with .Values.filesystem.roots }}
             - name: BOOTH_STORAGE_FILESYSTEM_ROOTS

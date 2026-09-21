@@ -1,13 +1,23 @@
-# A throwaway PostgreSQL for the integration test cluster, standing in for the shared
-# platform database (ADR 0014) that a real deployment provisions a role/database on.
-# Test fixture only — fixed credentials, no persistence.
+# A throwaway PostgreSQL for the integration test cluster, standing in for the shared platform
+# database (ADR 0014/0053) that booth-core would normally provision.
+#
+# The Secret below is what booth-core delivers to a module declaring `database: {enabled: true}`:
+# the name `booth-database-credentials` and the `dsn` plus host/port/database/username/password
+# keys (core-platform-api.md, "Shared PostgreSQL"). Creating it by hand lets the chart's DEFAULT
+# path be exercised without a real booth-core in the cluster. Test fixture only — fixed
+# credentials, no persistence.
 apiVersion: v1
 kind: Secret
 metadata:
-  name: booth-storage-db
+  name: booth-database-credentials
 type: Opaque
 stringData:
   dsn: postgres://booth:booth-test@postgres:5432/booth_storage?sslmode=disable
+  host: postgres
+  port: "5432"
+  database: booth_storage
+  username: booth
+  password: booth-test
 ---
 apiVersion: apps/v1
 kind: Deployment

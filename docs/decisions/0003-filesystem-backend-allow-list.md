@@ -35,6 +35,24 @@ not by the tenant's own cloud account.
 - Writes are atomic (temp file + rename in the same directory), and never create the root
   itself — only directories inside it.
 
+## Root directory handling (added 2026-09-21, after booth-e2e's first full run)
+
+booth-e2e found that registering a `rootPath` that didn't exist returned `201` and then failed every
+read and write with a 502. Implementation-level fix, not a contract change: `rootPath` is now
+checked at registration (and on edit).
+
+- exists and is a directory → used as is;
+- exists but is a file → refused (`422`);
+- missing, **parent exists** → the leaf directory is created (`0750`);
+- missing, parent missing too → refused (`422`), nothing created.
+
+**Why only the leaf**, and not the whole path: if the operator's volume failed to mount, creating
+the full path would silently succeed on the container's ephemeral disk, and a workspace would
+store "durable" data that vanishes on restart. Requiring the parent turns a missing mount into a
+loud error at registration. This runs *after* the allow-list policy, so nothing outside an allowed
+root is ever created. "Test connection" never creates anything and reports an uncreatable path as
+a failed check.
+
 ## Consequences
 
 - An operator who wants filesystem backends must mount volumes, set the roots, and make the

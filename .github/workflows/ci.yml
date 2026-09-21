@@ -101,8 +101,16 @@ jobs:
         run: |
           helm lint . \
             --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
+            --set oidc.clientId=booth-storage
+
+      - name: helm lint (own-database mode, no booth-core provisioning)
+        working-directory: charts/booth-storage
+        run: |
+          helm lint . \
+            --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
             --set oidc.clientId=booth-storage \
-            --set postgres.dsnSecret.name=booth-storage-db
+            --set postgres.provisionedByCore=false \
+            --set postgres.dsnSecret.name=my-database
 
       - name: helm template (render check, with the filesystem kind enabled)
         working-directory: charts/booth-storage
@@ -111,7 +119,6 @@ jobs:
             --namespace booth-storage \
             --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
             --set oidc.clientId=booth-storage \
-            --set postgres.dsnSecret.name=booth-storage-db \
             --set 'filesystem.roots[0]=/data/{workspace}' > /dev/null
 
   image-build:

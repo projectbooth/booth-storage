@@ -107,6 +107,23 @@ route/view prop and renders no nav link to `adminNavPath`.
 - [0003](docs/decisions/0003-filesystem-backend-allow-list.md) — filesystem kind is off by default (ratified: ADR 0040).
 - [0004](docs/decisions/0004-role-header-trust.md) — the role is derived from the token's `groups` claim and an over-claiming `X-Booth-Role` is rejected with 403 (ADR 0041). **`oidc.groupsClaim` must match booth-core's**, or every request is refused.
 
+## Behaviors worth knowing
+
+- **Database (ADR 0053/0054).** The manifest declares `database: {enabled: true}`, so booth-core
+  creates this module's PostgreSQL database and role and delivers the Secret
+  `booth-database-credentials` (`dsn` key) into the release namespace — nothing to create by hand.
+  The pod may wait in `CreateContainerConfigError` briefly after install until core writes it. To
+  bring your own database instead: `postgres.provisionedByCore=false` and `postgres.dsnSecret.name`.
+- **Filesystem `rootPath` is checked at registration.** A directory that exists is used as is; one
+  that is missing is **created if its parent directory exists**; if the parent is missing too, or the
+  path is a file, registration is refused (`422`). (Found by booth-e2e: a nonexistent root used to
+  register fine and then fail every read and write.) Only the leaf is ever created, deliberately: if
+  a volume failed to mount, creating the whole path would silently put data on the container's
+  ephemeral disk. "Test connection" reports an uncreatable path as a failed connection and never
+  creates anything.
+- **A path that runs through a file is not a server error.** `?prefix=` naming a file lists as
+  empty, reading through one is `404`, and creating beneath one is `409` — the same on every kind.
+
 ## Not done
 
 - **Azure hierarchical-namespace accounts are untested.** ADR 0037 names that mode; Azurite can't
@@ -127,4 +144,6 @@ route/view prop and renders no nav link to `adminNavPath`.
 - Deploying alongside a real, pinned booth-core (`test/integration/README.md`).
 - The layer-3 workflow has never been executed (no kind/k3d available when written).
 - Quotas, object copy (as distinct from move), and handing credentials to other modules — out of v0 scope.
-- No shared Postgres role/DB provisioning: the chart takes an existing Secret (`postgres.dsnSecret`).
+- Nothing has run this module against a real booth-core's database provisioning yet: the chart
+  declares `database: {enabled: true}` and reads `booth-database-credentials`/`dsn`, and CI
+  exercises that with a hand-made Secret of the same shape, not one core wrote.

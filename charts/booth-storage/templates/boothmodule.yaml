@@ -27,6 +27,13 @@ spec:
   requiredScopes:
     - storage.read
     - storage.write
+  {{- if .Values.postgres.provisionedByCore }}
+  # ADR 0053/0054: ask booth-core to provision this module's PostgreSQL database and role and
+  # deliver them as the Secret `booth-database-credentials`. Omitting the field means core
+  # provisions nothing, so it is only left out when the operator supplies their own database.
+  database:
+    enabled: true
+  {{- end }}
   serviceRef:
     name: {{ include "booth-storage.fullname" . }}
     port: {{ .Values.service.port }}
