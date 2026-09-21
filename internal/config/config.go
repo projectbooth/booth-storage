@@ -57,6 +57,8 @@ func Load() (Config, error) {
 			ClientID:        os.Getenv("BOOTH_OIDC_CLIENT_ID"),
 			RequireAudience: os.Getenv("BOOTH_OIDC_REQUIRE_AUDIENCE") == "true",
 			GroupsClaim:     getEnv("BOOTH_OIDC_GROUPS_CLAIM", auth.DefaultGroupsClaim),
+			// Optional: booth-core's issuer URL, to also accept its workload tokens (ADR 0056).
+			WorkloadIssuerURL: os.Getenv("BOOTH_WORKLOAD_ISSUER_URL"),
 		},
 	}
 

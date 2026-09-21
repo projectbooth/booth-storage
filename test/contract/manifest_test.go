@@ -282,3 +282,15 @@ func TestChart_PassesGroupsClaim(t *testing.T) {
 		t.Error("oidc.groupsClaim override not rendered")
 	}
 }
+
+// Trusting booth-core as a second token issuer (ADR 0056) is opt-in: nothing is rendered
+// unless the operator names core's issuer URL.
+func TestChart_WorkloadIssuer(t *testing.T) {
+	if bytes.Contains(helmTemplate(t, "templates/deployment.yaml"), []byte("BOOTH_WORKLOAD_ISSUER_URL")) {
+		t.Error("BOOTH_WORKLOAD_ISSUER_URL rendered by default; the IdP should be the only trusted issuer")
+	}
+	got := helmTemplate(t, "templates/deployment.yaml", "--set", "oidc.workloadIssuerUrl=http://booth-core.booth:8080")
+	if !regexp.MustCompile(`BOOTH_WORKLOAD_ISSUER_URL\s+value: "http://booth-core.booth:8080"`).Match(got) {
+		t.Errorf("oidc.workloadIssuerUrl not rendered:\n%s", got)
+	}
+}

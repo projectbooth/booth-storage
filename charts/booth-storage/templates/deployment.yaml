@@ -42,6 +42,10 @@ spec:
               value: {{ .Values.oidc.requireAudience | quote }}
             - name: BOOTH_OIDC_GROUPS_CLAIM
               value: {{ .Values.oidc.groupsClaim | quote }}
+            {{- with .Values.oidc.workloadIssuerUrl }}
+            - name: BOOTH_WORKLOAD_ISSUER_URL
+              value: {{ . | quote }}
+            {{- end }}
             - name: BOOTH_POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

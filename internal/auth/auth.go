@@ -15,6 +15,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -65,17 +66,30 @@ type OIDCConfig struct {
 	// because not every OIDC provider calls it "groups"; must match booth-core's setting.
 	// Empty means the default, "groups".
 	GroupsClaim string
+	// WorkloadIssuerURL, if set, is booth-core's own issuer URL (ADR 0056), trusted as a
+	// second issuer for short-lived workload tokens that represent an unattended run rather
+	// than a person. Its keys are read from <WorkloadIssuerURL>/.well-known/jwks.json. Such a
+	// token carries the same audience and groups claim as a human's, so everything downstream
+	// of verification is unchanged. Empty (the default) trusts the identity provider only.
+	WorkloadIssuerURL string
 }
 
 // DefaultGroupsClaim matches booth-core's default (ADR 0025).
 const DefaultGroupsClaim = "groups"
 
+// workloadJWKSPath is where booth-core publishes its workload-token signing keys, relative
+// to its issuer URL (ADR 0056).
+const workloadJWKSPath = "/.well-known/jwks.json"
+
 // Verifier verifies bearer tokens against the same OIDC provider booth-core is
 // configured against (signature via JWKS, issuer, expiry, and, per deployment policy,
-// audience).
+// audience) and, when configured, against booth-core's own workload-token issuer.
 type Verifier struct {
-	idTokenVerifier *oidc.IDTokenVerifier
-	groupsClaim     string
+	// byIssuer maps a trusted issuer URL to the verifier for it. A token's (unverified)
+	// iss only selects which verifier runs; that verifier then checks the issuer itself
+	// along with signature, expiry and audience, so a forged iss gains nothing.
+	byIssuer    map[string]*oidc.IDTokenVerifier
+	groupsClaim string
 }
 
 func NewVerifier(ctx context.Context, cfg OIDCConfig) (*Verifier, error) {
@@ -87,17 +101,56 @@ func NewVerifier(ctx context.Context, cfg OIDCConfig) (*Verifier, error) {
 	if claim == "" {
 		claim = DefaultGroupsClaim
 	}
-	return &Verifier{
-		idTokenVerifier: provider.Verifier(&oidc.Config{
-			SkipClientIDCheck: !cfg.RequireAudience,
-			ClientID:          cfg.ClientID,
-		}),
+	verifierConfig := &oidc.Config{
+		SkipClientIDCheck: !cfg.RequireAudience,
+		ClientID:          cfg.ClientID,
+	}
+	v := &Verifier{
+		byIssuer:    map[string]*oidc.IDTokenVerifier{cfg.IssuerURL: provider.Verifier(verifierConfig)},
 		groupsClaim: claim,
-	}, nil
+	}
+	if wl := cfg.WorkloadIssuerURL; wl != "" {
+		if wl == cfg.IssuerURL {
+			return nil, fmt.Errorf("the workload issuer must differ from the OIDC issuer (both %s)", wl)
+		}
+		// Keys are fetched lazily, on the first workload token: booth-core may not be up yet
+		// when this module starts, and that must not stop it serving human tokens.
+		keys := oidc.NewRemoteKeySet(ctx, strings.TrimRight(wl, "/")+workloadJWKSPath)
+		v.byIssuer[wl] = oidc.NewVerifier(wl, keys, verifierConfig)
+	}
+	return v, nil
+}
+
+// unverifiedIssuer reads the iss claim from a JWT's payload without checking anything. It
+// is only ever used to choose which verifier to hand the token to.
+func unverifiedIssuer(rawToken string) (string, error) {
+	parts := strings.Split(rawToken, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("malformed token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("malformed token payload: %w", err)
+	}
+	var p struct {
+		Issuer string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return "", fmt.Errorf("malformed token payload: %w", err)
+	}
+	return p.Issuer, nil
 }
 
 func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Claims, error) {
-	idToken, err := v.idTokenVerifier.Verify(ctx, rawToken)
+	issuer, err := unverifiedIssuer(rawToken)
+	if err != nil {
+		return nil, fmt.Errorf("token verification failed: %w", err)
+	}
+	verifier, ok := v.byIssuer[issuer]
+	if !ok {
+		return nil, fmt.Errorf("token verification failed: issuer %q is not trusted", issuer)
+	}
+	idToken, err := verifier.Verify(ctx, rawToken)
 	if err != nil {
 		return nil, fmt.Errorf("token verification failed: %w", err)
 	}

@@ -20,6 +20,12 @@ oidc:
   # caller's role from it rather than trusting the gateway-forwarded X-Booth-Role, so it MUST
   # match booth-core's BOOTH_OIDC_GROUPS_CLAIM.
   groupsClaim: groups
+  # Optional: booth-core's issuer URL (its in-cluster Service URL, the same value as
+  # booth-core's workloadIdentity issuer), so this module also accepts core's short-lived
+  # workload tokens for unattended runs, e.g. scheduled pipelines (ADR 0056). Core's keys are
+  # read from <url>/.well-known/jwks.json. Empty trusts the OIDC provider only. Must differ
+  # from issuerUrl.
+  workloadIssuerUrl: ""
 
 # Backend metadata (which backends exist, how they're configured — never credentials)
 # lives in this module's own database on the shared PostgreSQL cluster (ADR 0014).

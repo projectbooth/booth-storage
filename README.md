@@ -106,6 +106,7 @@ route/view prop and renders no nav link to `adminNavPath`.
 - [0002](docs/decisions/0002-admin-view-mounting-gap.md) — admin view mounting gap; routed to booth-design.
 - [0003](docs/decisions/0003-filesystem-backend-allow-list.md) — filesystem kind is off by default (ratified: ADR 0040).
 - [0004](docs/decisions/0004-role-header-trust.md) — the role is derived from the token's `groups` claim and an over-claiming `X-Booth-Role` is rejected with 403 (ADR 0041). **`oidc.groupsClaim` must match booth-core's**, or every request is refused.
+- [0005](docs/decisions/0005-workload-token-issuer.md) — optionally trusts booth-core's JWKS as a second token issuer for unattended-run (workload) tokens (ADR 0056); off unless `oidc.workloadIssuerUrl` is set.
 
 ## Behaviors worth knowing
 

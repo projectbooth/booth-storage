@@ -149,6 +149,101 @@ func TestVerifier(t *testing.T) {
 	}
 }
 
+// newFakeCore is booth-core's workload-token issuer as ADR 0056 describes it: a signing key
+// and a JWKS at the fixed well-known path. Unlike fakeIdP it serves no discovery document,
+// which is how the verifier must be able to trust it.
+func newFakeCore(t *testing.T) *fakeIdP {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeIdP{key: key}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
+	})
+	core.server = httptest.NewServer(mux)
+	t.Cleanup(core.server.Close)
+	return core
+}
+
+func TestVerifier_WorkloadIssuer(t *testing.T) {
+	idp := newFakeIdP(t)
+	core := newFakeCore(t)
+	ctx := context.Background()
+
+	both, err := NewVerifier(ctx, OIDCConfig{IssuerURL: idp.server.URL, ClientID: "booth-storage", RequireAudience: true, WorkloadIssuerURL: core.server.URL})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	idpOnly, err := NewVerifier(ctx, OIDCConfig{IssuerURL: idp.server.URL, ClientID: "booth-storage", RequireAudience: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := []string{"/workspaces/acme/editor"}
+
+	cases := []struct {
+		name     string
+		verifier *Verifier
+		token    string
+		wantSub  string
+		wantErr  bool
+	}{
+		{"human token still verifies", both, idp.token(t, tokenOpts{subject: "alice", audience: "booth-storage", groups: groups}), "alice", false},
+		{"workload token verifies", both, core.token(t, tokenOpts{subject: "job:42", audience: "booth-storage", groups: groups}), "job:42", false},
+		{"workload token with no second issuer configured is refused", idpOnly, core.token(t, tokenOpts{subject: "job:42", audience: "booth-storage", groups: groups}), "", true},
+		{"workload token audience is enforced like a human's", both, core.token(t, tokenOpts{subject: "job:42", audience: "someone-else", groups: groups}), "", true},
+		{"expired workload token", both, core.token(t, tokenOpts{subject: "job:42", audience: "booth-storage", expiry: -time.Hour}), "", true},
+		// Each issuer's keys are good for that issuer only: neither can vouch for the other.
+		{"core's key claiming the IdP's issuer", both, core.token(t, tokenOpts{subject: "mallory", issuer: idp.server.URL, audience: "booth-storage"}), "", true},
+		{"IdP's key claiming core's issuer", both, idp.token(t, tokenOpts{subject: "mallory", issuer: core.server.URL, audience: "booth-storage"}), "", true},
+		{"an untrusted issuer", both, core.token(t, tokenOpts{subject: "mallory", issuer: "https://evil.example", audience: "booth-storage"}), "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			claims, err := tc.verifier.Verify(ctx, tc.token)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Verify succeeded with claims %+v, want an error", claims)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if claims.Subject != tc.wantSub {
+				t.Errorf("subject = %q, want %q", claims.Subject, tc.wantSub)
+			}
+			// The role-derivation input (ADR 0041) is the same whichever issuer signed it.
+			if got := RoleInWorkspace(claims.Groups, "acme"); got != RoleEditor {
+				t.Errorf("role in acme = %q, want editor", got)
+			}
+		})
+	}
+}
+
+// Trusting core must not depend on core being reachable when this module starts: its keys
+// are fetched on the first workload token, and human tokens work meanwhile.
+func TestVerifier_WorkloadIssuerDownAtStartup(t *testing.T) {
+	idp := newFakeIdP(t)
+	ctx := context.Background()
+	v, err := NewVerifier(ctx, OIDCConfig{IssuerURL: idp.server.URL, ClientID: "booth-storage", WorkloadIssuerURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("NewVerifier must not need core to be up: %v", err)
+	}
+	if _, err := v.Verify(ctx, idp.token(t, tokenOpts{subject: "alice"})); err != nil {
+		t.Errorf("human token refused while core is down: %v", err)
+	}
+}
+
+func TestNewVerifier_WorkloadIssuerMustDifferFromIdP(t *testing.T) {
+	idp := newFakeIdP(t)
+	if _, err := NewVerifier(context.Background(), OIDCConfig{IssuerURL: idp.server.URL, WorkloadIssuerURL: idp.server.URL}); err == nil {
+		t.Error("NewVerifier accepted the IdP as its own workload issuer")
+	}
+}
+
 func TestNewVerifier_UnreachableIssuer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
