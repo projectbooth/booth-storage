@@ -8,7 +8,9 @@
 # This is a stopgap until booth-core publishes a pinned, referenceable build our CI can
 # install CRDs from directly (contracts/testing-strategy.md's "booth-core should publish a
 # versioned, referenceable build other repos' CI can pin to"). Keep this in sync with
-# booth-core's CRD by hand until then. Re-vendored 2026-09-21 to pick up `database` (ADR 0053).
+# booth-core's CRD by hand until then. Re-vendored 2026-09-22 to pick up `workloadIdentity`
+# (ADR 0056) — re-vendored fresh from source rather than hand-patched, per booth-logging's
+# finding that hand-patching is how it drifted last time.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -200,6 +202,21 @@ spec:
               version:
                 description: Version is the module's own release version (semver).
                 type: string
+              workloadIdentity:
+                description: |-
+                  WorkloadIdentity signals that this module runs unattended work (a scheduled job, no
+                  human present) that must call other modules on a workspace's behalf (ADR 0056). Core
+                  then provisions a minting credential as the Secret `booth-workload-minting-credentials`
+                  in the module's namespace, which the module presents to
+                  POST /api/internal/workload-tokens. Omit it and the module never receives a credential
+                  and cannot mint anything.
+                properties:
+                  mint:
+                    description: Mint requests a minting credential for this module.
+                    type: boolean
+                required:
+                - mint
+                type: object
             required:
             - contractVersion
             - displayName
