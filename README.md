@@ -144,7 +144,11 @@ route/view prop and renders no nav link to `adminNavPath`.
   I didn't invent one. Today a consumer addresses an object as backend ID + path.
 - Deploying alongside a real, pinned booth-core (`test/integration/README.md`).
 - The layer-3 workflow has never been executed (no kind/k3d available when written).
-- Quotas, object copy (as distinct from move), and handing credentials to other modules — out of v0 scope.
+- Quotas, object copy (as distinct from move), and handing credentials to other modules — out of
+  v0 scope. The latter is coming as the `s3`-kind credential broker provider (ADR 0080); design
+  answers to `booth-lakehouse`'s AWS/MinIO constraints are recorded in
+  [decision 0006](docs/decisions/0006-s3-credential-broker-provider-design.md) ahead of
+  `booth-core`'s broker routing landing.
 - Nothing has run this module against a real booth-core's database provisioning yet: the chart
   declares `database: {enabled: true}` and reads `booth-database-credentials`/`dsn`, and CI
   exercises that with a hand-made Secret of the same shape, not one core wrote.
