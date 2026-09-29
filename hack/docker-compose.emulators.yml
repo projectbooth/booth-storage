@@ -10,6 +10,15 @@
 # GCS needs no container: its tests use fake-gcs-server in-process.
 services:
   minio:
+    # TODO(ADR 0087, flagged 2026-09-29): quay.io/minio/minio now refuses anonymous pulls
+    # entirely (verified directly here: even a specific digest 401s, not just `:latest` — an
+    # external MinIO policy change, not a regression in this repo). The fix is switching to
+    # `ghcr.io/projectbooth/minio-test@<digest>`, the one shared, digest-pinned mirror
+    # booth-lakehouse is publishing from its own already-working cached copy — not a
+    # second, independently-chosen mirror here, so both modules test against the literal
+    # same MinIO build. Not yet published as of this flag (`docker pull` → "denied"); switch
+    # this line the moment it is, rather than a local workaround that would just recreate the
+    # two-mirrors problem ADR 0087 exists to avoid.
     image: quay.io/minio/minio:latest
     command: server /data
     environment:
