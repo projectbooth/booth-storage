@@ -36,6 +36,9 @@ type boothModule struct {
 		Database          *struct {
 			Enabled bool `yaml:"enabled"`
 		} `yaml:"database"`
+		ProvidesCredentials *struct {
+			Kinds []string `yaml:"kinds"`
+		} `yaml:"providesCredentials"`
 		ServiceRef struct {
 			Name string `yaml:"name"`
 			Port int    `yaml:"port"`
@@ -292,5 +295,32 @@ func TestChart_WorkloadIssuer(t *testing.T) {
 	got := helmTemplate(t, "templates/deployment.yaml", "--set", "oidc.workloadIssuerUrl=http://booth-core.booth:8080")
 	if !regexp.MustCompile(`BOOTH_WORKLOAD_ISSUER_URL\s+value: "http://booth-core.booth:8080"`).Match(got) {
 		t.Errorf("oidc.workloadIssuerUrl not rendered:\n%s", got)
+	}
+}
+
+// Providing the ADR 0080/0088 credential broker is opt-in (docs/decisions/0006): neither the
+// manifest field nor the Secret-sourced env var appears unless the operator turns it on.
+func TestChart_CredentialBrokerDisabledByDefault(t *testing.T) {
+	m := renderBoothModule(t)
+	if m.Spec.ProvidesCredentials != nil {
+		t.Errorf("spec.providesCredentials = %+v, want nil by default", m.Spec.ProvidesCredentials)
+	}
+	if bytes.Contains(helmTemplate(t, "templates/deployment.yaml"), []byte("BOOTH_CREDENTIAL_BROKER_CREDENTIAL")) {
+		t.Error("BOOTH_CREDENTIAL_BROKER_CREDENTIAL rendered by default; this is a new privileged capability that must be opted into")
+	}
+}
+
+func TestChart_CredentialBrokerEnabled(t *testing.T) {
+	var m boothModule
+	if err := yaml.Unmarshal(helmTemplate(t, "templates/boothmodule.yaml", "--set", "credentialBroker.enabled=true"), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Spec.ProvidesCredentials == nil || len(m.Spec.ProvidesCredentials.Kinds) != 1 || m.Spec.ProvidesCredentials.Kinds[0] != "s3" {
+		t.Fatalf("spec.providesCredentials = %+v, want {kinds: [s3]}", m.Spec.ProvidesCredentials)
+	}
+
+	dep := helmTemplate(t, "templates/deployment.yaml", "--set", "credentialBroker.enabled=true")
+	if !regexp.MustCompile(`secretKeyRef:\s+name: booth-credential-broker-provider-credentials\s+key: credential`).Match(dep) {
+		t.Errorf("BOOTH_CREDENTIAL_BROKER_CREDENTIAL is not read from booth-credential-broker-provider-credentials/credential:\n%s", dep)
 	}
 }

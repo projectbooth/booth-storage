@@ -33,6 +33,7 @@ import (
 
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/backend"
+	"github.com/projectbooth/booth-storage/internal/credentialbroker"
 	"github.com/projectbooth/booth-storage/internal/registry"
 )
 
@@ -46,6 +47,11 @@ type Deps struct {
 	Registry *registry.Service
 	// MaxUploadBytes caps one object write; 0 means unlimited.
 	MaxUploadBytes int64
+	// CredentialBrokerCredential is this module's copy of the shared secret core presents
+	// to the ADR 0080 credential-broker provider route (POST /internal/credentials, see
+	// internal/credentialbroker) — the route is always mounted, but empty means every call
+	// is refused: there is no meaningful "unconfigured, so allow" state for it.
+	CredentialBrokerCredential string
 }
 
 func NewRouter(deps Deps) http.Handler {
@@ -62,6 +68,14 @@ func NewRouter(deps Deps) http.Handler {
 	// blipped would only make an outage worse.
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// ADR 0080's credential-broker provider route: called directly by booth-core (never
+	// through the gateway), authenticated by its own shared-secret mechanism rather than
+	// auth.Middleware's OIDC verification — see internal/credentialbroker's package doc.
+	r.Post(credentialbroker.ProviderPath, credentialbroker.NewHandler(credentialbroker.Deps{
+		Credential: deps.CredentialBrokerCredential,
+		Registry:   deps.Registry,
+	}).ServeHTTP)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(deps.Verifier))

@@ -42,16 +42,25 @@ type Config struct {
 	// so the module can run on a laptop with no cluster or database. State and
 	// credentials vanish on restart: it exists for local development only.
 	DevMemory bool
+
+	// CredentialBrokerCredential is this module's own copy of the shared secret
+	// booth-core presents when calling the ADR 0080 credential-broker provider endpoint
+	// (contracts/credential-broker.md, ADR 0088) — the booth-credential-broker-provider-
+	// credentials Secret's `credential` key, delivered once the chart declares
+	// `providesCredentials: {kinds: ["s3"]}`. Empty disables the route: every call is
+	// refused rather than trusted on an unconfigured, always-true comparison.
+	CredentialBrokerCredential string
 }
 
 // Load reads configuration from the environment.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:        getEnv("BOOTH_HTTP_ADDR", ":8080"),
-		PostgresDSN:     os.Getenv("BOOTH_POSTGRES_DSN"),
-		Namespace:       getEnv("BOOTH_NAMESPACE", "booth-storage"),
-		FilesystemRoots: splitNonEmpty(os.Getenv("BOOTH_STORAGE_FILESYSTEM_ROOTS")),
-		DevMemory:       os.Getenv("BOOTH_STORAGE_DEV_MEMORY") == "true",
+		HTTPAddr:                   getEnv("BOOTH_HTTP_ADDR", ":8080"),
+		PostgresDSN:                os.Getenv("BOOTH_POSTGRES_DSN"),
+		Namespace:                  getEnv("BOOTH_NAMESPACE", "booth-storage"),
+		FilesystemRoots:            splitNonEmpty(os.Getenv("BOOTH_STORAGE_FILESYSTEM_ROOTS")),
+		DevMemory:                  os.Getenv("BOOTH_STORAGE_DEV_MEMORY") == "true",
+		CredentialBrokerCredential: os.Getenv("BOOTH_CREDENTIAL_BROKER_CREDENTIAL"),
 		OIDC: auth.OIDCConfig{
 			IssuerURL:       os.Getenv("BOOTH_OIDC_ISSUER_URL"),
 			ClientID:        os.Getenv("BOOTH_OIDC_CLIENT_ID"),

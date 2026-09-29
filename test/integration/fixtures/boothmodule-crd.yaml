@@ -8,9 +8,8 @@
 # This is a stopgap until booth-core publishes a pinned, referenceable build our CI can
 # install CRDs from directly (contracts/testing-strategy.md's "booth-core should publish a
 # versioned, referenceable build other repos' CI can pin to"). Keep this in sync with
-# booth-core's CRD by hand until then. Re-vendored 2026-09-22 to pick up `workloadIdentity`
-# (ADR 0056) — re-vendored fresh from source rather than hand-patched, per booth-logging's
-# finding that hand-patching is how it drifted last time.
+# booth-core's CRD by hand until then. Re-vendored 2026-09-29 to pick up
+# `providesCredentials` (ADR 0080/0088), fresh from source per the established practice.
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -162,6 +161,32 @@ spec:
                   NavPath is where this module attaches in the shell's navigation. Required
                   when HasOwnUI is true.
                 type: string
+              providesCredentials:
+                description: |-
+                  ProvidesCredentials declares which native-protocol credential kind(s) (e.g. "s3",
+                  "postgres") this module provides through the credential broker (ADR 0080). Core provisions
+                  a broker-calling credential as the Secret `booth-credential-broker-provider-credentials`
+                  in the module's namespace, and routes an authorized `POST /api/credentials` request for a
+                  declared kind to this module. Omit it and the module never receives that Secret and is
+                  never routed to. A module that only ever *consumes* a credential (calls the broker as
+                  itself, or on behalf of a task holding a workload token) needs no manifest declaration at
+                  all — the broker's authorization is ordinary identity/workspace/role, the same as any
+                  other authenticated route.
+                properties:
+                  kinds:
+                    description: |-
+                      Kinds lists the credential kind(s) this module provides (e.g. "s3", "postgres"). At most
+                      one module may declare a given kind fleet-wide — core refuses to route a kind with more
+                      than one registered provider rather than guessing.
+                    items:
+                      pattern: ^[a-z][a-z0-9-]*$
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - kinds
+                type: object
               requiredScopes:
                 description: RequiredScopes lists auth scopes the module needs core
                   to grant it access to.

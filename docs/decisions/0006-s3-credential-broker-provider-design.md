@@ -1,9 +1,12 @@
 # 0006: `s3`-kind credential broker provider — design answers to `booth-lakehouse`'s constraints
 
-Status: **design only, not implemented** — `booth-core`'s broker routing (ADR 0080) hasn't
-landed, so there is no manifest field or request/response shape to build against yet. This
-records the three questions `booth-lakehouse`'s first pass (ADR 0084) sharpened, so
-implementation follows a settled plan instead of starting cold once the contract exists.
+Status: **implemented** (ADR 0088 shipped the concrete broker mechanism) —
+`internal/credentialbroker` (the `POST /internal/credentials` provider route) and
+`internal/backend/s3/credentials.go` (`Config.MintScopedCredential`, the actual minting
+logic). This file originally recorded a design pass written before the broker existed; it now
+also records what was actually built and how it was verified. The three questions
+`booth-lakehouse`'s first pass (ADR 0084) sharpened are unchanged from the original design —
+implementation followed the plan below as written.
 
 ## 1. AWS IAM keys can't expire — when do we refuse?
 
@@ -70,15 +73,69 @@ placeholder.
   alone. Worth a unit test once built, since this is exactly the kind of MinIO quirk that's easy
   to silently regress.
 
-## What's still genuinely open, left to `booth-core`'s contract
+## What ADR 0088 fixed, and how the design above landed
 
-- The actual manifest field / registration shape for declaring "I provide kind `s3`."
-- The request/response envelope and how a provider is authorized to trust a forwarded request
-  (`contracts/credential-broker.md`'s "not yet fixed" list).
-- Whether "no session token allowed" is a formal part of the shared request vocabulary the
-  broker defines, or an `s3`-kind-specific parameter this module alone interprets. §1 above
-  assumes the latter is acceptable but the former would be cleaner if `postgres`-kind or a future
-  kind ever has an analogous constraint.
+- **Manifest field**: `providesCredentials: {kinds: ["s3"]}`, rendered only when
+  `credentialBroker.enabled` is set (off by default — a new privileged capability, not an
+  operational convenience like database provisioning; see the chart's own comment).
+- **Provider path/auth**: `POST /internal/credentials` (`credentialbroker.ProviderPath`),
+  authenticated by comparing the presented `Authorization: Bearer` against this module's own
+  copy of the Secret `booth-credential-broker-provider-credentials` (`credential` key) —
+  **a constant-time string comparison, not a re-derived HMAC**. Core never hands this module the
+  raw HMAC key it derives that credential from (`credentialbroker.Keys` is core-only, and the
+  provisioned Secret carries the finished value); the contract itself says a provider "needs its
+  own copy of the shared secret from the delivered Secret, not this package," so comparing
+  against that stored copy achieves the identical property (only a holder of core's key could
+  have produced that exact value) without this module ever needing the key.
+- **Request/response wire shape for `s3`**: adopted verbatim from `booth-lakehouse`'s own
+  already-built, already-tested client (`client/src/booth_lakehouse/broker.py`,
+  `tests/integration/fakecore.py`) rather than inventing a second one — `scope: {backendId,
+  path}`, `options: {sessionToken: "forbidden"|"allowed"}` for exactly the §1 split below, and a
+  response `credential` carrying `endpoint/region/bucket/keyPrefix/pathStyle/accessKeyId/
+  secretAccessKey/sessionToken?` per §2. `options.sessionToken` absent defaults to `"allowed"`
+  (a session token is fine if the credential naturally has one — it does not require one).
+- **§1 landed narrower than first drafted, in one useful way**: MinIO's `AddServiceAccount`
+  (an expiring service account) always returns a bare pair, so it alone satisfies *both*
+  `options.sessionToken` values for a MinIO-backed (any backend with a configured `Endpoint`)
+  backend — no separate STS code path was needed there after all. Real AWS S3 (empty
+  `Endpoint`) refuses both values today: the bare-pair case is the structural impossibility
+  described below; the session-token-allowed case would need `sts:AssumeRole` against a system
+  identity, which has no config surface in this module yet (`assumeRoleArn` was never added) —
+  refused as "not implemented" rather than attempted half-built.
+- **§3 built exactly as designed**: `scopedPolicy` in `credentials.go` produces the
+  three-statement shape (prefix-scoped data actions, unconditional `GetBucketLocation`,
+  `ListBucket` with the `s3:prefix` `StringLike` condition), plus one case the original design
+  didn't call out: a backend/request with **no prefix at all** (a whole-bucket grant) needed its
+  own branch so the resource ARN reads `bucket/*` rather than `bucket//*` — a leading-slash
+  resource would match no real object key and silently deny everything. Covered by
+  `TestScopedPolicy`.
 
-Not building the provider endpoint itself in this pass — there's nothing to route to it yet, and
-`booth-core`'s broker routing landing first is the correct order per the brief.
+## How this was verified
+
+- **Deterministic, no real MinIO needed**: `internal/credentialbroker/provider_test.go` covers
+  authentication (including that an unconfigured/empty credential refuses even an empty bearer,
+  never matching on two empty strings), request validation, kind/backend-kind routing errors,
+  the AWS refusal path, a minting-layer failure being relayed as `502`, and — the part that
+  matters most for real interop — the exact success response shape (`leaseId/kind/expiresAt/
+  scope/credential` with every field `booth-lakehouse`'s real client parser requires), the audit
+  log recording the issuance without ever containing the minted secret, and that
+  `options.sessionToken` correctly reaches `MintRequest.AllowSessionToken`.
+  `internal/backend/s3/credentials_test.go` covers `scopedPolicy` directly and the AWS-refusal /
+  input-validation paths with no network at all.
+- **Real MinIO** (`TestMintScopedCredential_RealMinIO*`, same `BOOTH_TEST_S3_ENDPOINT`-gated
+  pattern as `s3_test.go`): mints a real expiring service account, then uses the *minted*
+  credential (not the admin's) to prove an in-scope object is readable, an out-of-scope one
+  isn't, a read-only grant can't write, and the TTL floor/ceiling clamp both directions —
+  **written but not executed in the environment this was built in**: `hack/docker-compose.
+  emulators.yml`'s MinIO image currently fails to pull at all (ADR 0087 — verified directly here
+  too, both `:latest` and a pinned digest 401 anonymously), the same fleet-wide break that ADR
+  documents. These tests skip cleanly without the emulator rather than faking green.
+- **Not attempted: a real cross-process test against `booth-core`'s actual binary.** Looked at
+  seriously (core has a real dev mode — `BOOTH_DEV_REGISTRY_PATH` — that needs no Kubernetes
+  cluster), but `internal/devregistry`'s file format has no field for `providesCredentials` at
+  all (nor `database`/`workloadIdentity` — it's deliberately scoped to gateway routing only, not
+  the provisioning-controller-dependent fields), so `findProvider("s3")` can never succeed
+  against a dev-mode registry: core's real broker *routing* structurally requires a real
+  Kubernetes cluster with the CRD controller running, which is `test/integration/README.md`'s
+  already-documented, pre-existing layer-3 gap, not a new one. Given that, the two test layers
+  above are the strongest verification achievable without one.

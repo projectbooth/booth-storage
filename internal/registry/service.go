@@ -328,6 +328,27 @@ func (s *Service) Open(ctx context.Context, workspace, id string) (backend.Backe
 	return b, nil
 }
 
+// RawCredentials returns a registered backend's record together with its actual stored
+// credentials (ErrNoCredentials if none) — unlike Open, which wraps them in a backend.Backend
+// for this module's own read/write/list API. This exists for exactly one caller,
+// internal/credentialbroker: minting an ADR 0080 scoped credential needs the real admin
+// access key/secret to derive a narrower one from (ADR 0039 — this module already holds it;
+// nobody else ever does), not a Backend's higher-level operations.
+func (s *Service) RawCredentials(ctx context.Context, workspace, id string) (Record, map[string]string, error) {
+	rec, err := s.Get(ctx, workspace, id)
+	if err != nil {
+		return Record{}, nil, err
+	}
+	if !rec.HasCredentials {
+		return rec, nil, ErrNoCredentials
+	}
+	creds, err := s.creds.Get(ctx, workspace, id)
+	if err != nil {
+		return Record{}, nil, err
+	}
+	return rec, creds, nil
+}
+
 // Test checks connectivity for a not-yet-saved spec, so an admin can verify a form
 // before committing it. Nothing is persisted.
 func (s *Service) Test(ctx context.Context, workspace string, in CreateInput) error {

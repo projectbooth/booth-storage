@@ -47,6 +47,26 @@ postgres:
     name: ""
     key: dsn
 
+# ADR 0080's credential broker (contracts/credential-broker.md, mechanism fixed by ADR 0088):
+# whether this module offers to mint short-lived, narrowly-scoped `s3` credentials on
+# booth-core's behalf, for a task/module that needs real, direct object-storage access
+# (Iceberg engines via booth-lakehouse, ADR 0079) rather than going through this module's own
+# HTTP byte-proxy API. Off by default: this is a new privileged capability (a caller with
+# broker access gets a raw S3 credential bypassing this module's own audit/path logic, only
+# narrowed by the requested prefix and access level), not an operational convenience like
+# database provisioning, so an operator opts in deliberately.
+#
+# Turning it on declares `providesCredentials: {kinds: ["s3"]}` on the BoothModule manifest,
+# which makes core deliver the Secret `booth-credential-broker-provider-credentials`
+# (`credential` key) to this release's namespace and route matching requests here. Today only
+# self-hosted, MinIO-compatible backends (a configured `endpoint`, e.g. this module's own
+# reference deployment) can actually mint a credential — real AWS S3 backends refuse every
+# request (docs/decisions/0006): AWS has no way to issue a genuinely expiring credential
+# without a mandatory session token, and Lakekeeper's own warehouse-credential shape has no
+# field for one.
+credentialBroker:
+  enabled: false
+
 # Credentials for each registered backend are stored as Kubernetes Secrets in the
 # release namespace (ADR 0020: booth-storage is the granting module). The Role below
 # grants exactly get/create/update/delete on Secrets in this one namespace, so install

@@ -725,3 +725,29 @@ func TestDataAPI_MissingCredentialsIsActionable(t *testing.T) {
 		t.Errorf("status = %d, want 502 for an unreachable storage service (body: %s)", r.Code, r.Body)
 	}
 }
+
+// The ADR 0080/0088 credential-broker provider route is really wired into the router (not
+// just tested in isolation in internal/credentialbroker), reachable with no bearer token at
+// all through auth.Middleware — it has its own, entirely different authentication — and an
+// unconfigured deployment (no Credential, the chart's default) refuses it outright rather
+// than through some other, accidental path.
+func TestRouter_CredentialBrokerRouteIsWired(t *testing.T) {
+	e := newTestEnv(t) // Deps.CredentialBrokerCredential left empty, the chart's default
+	req := httptest.NewRequest(http.MethodPost, "/internal/credentials", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	e.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (unconfigured credential refuses everyone), body: %s", rec.Code, rec.Body)
+	}
+
+	e2 := newTestEnv(t, func(d *Deps) { d.CredentialBrokerCredential = "bcbp.storage.test" })
+	req2 := httptest.NewRequest(http.MethodPost, "/internal/credentials", strings.NewReader(`{}`))
+	req2.Header.Set("Authorization", "Bearer bcbp.storage.test")
+	rec2 := httptest.NewRecorder()
+	e2.handler.ServeHTTP(rec2, req2)
+	// Authenticated, but past that point it's an ordinary bad request (empty body has no
+	// kind/access/scope) — proves the real credentialbroker handler, not a stub, is mounted.
+	if rec2.Code == http.StatusUnauthorized {
+		t.Errorf("status = %d, want past authentication with the right credential, body: %s", rec2.Code, rec2.Body)
+	}
+}

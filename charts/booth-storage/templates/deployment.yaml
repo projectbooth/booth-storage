@@ -59,6 +59,17 @@ spec:
             - name: BOOTH_STORAGE_MAX_UPLOAD_BYTES
               value: {{ .Values.maxUploadBytes | int64 | quote }}
             {{- end }}
+            {{- if .Values.credentialBroker.enabled }}
+            # ADR 0080/0088: core's own copy of this same value is what it presents as
+            # `Authorization: Bearer` on every call to POST /internal/credentials. The pod may
+            # sit in CreateContainerConfigError for a moment after install until core has
+            # written this Secret, the same as the database DSN above.
+            - name: BOOTH_CREDENTIAL_BROKER_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: booth-credential-broker-provider-credentials
+                  key: credential
+            {{- end }}
           # /livez does not look at the database on purpose: restarting the pod cannot fix
           # a Postgres outage. /healthz (readiness, and what core polls) does.
           livenessProbe:

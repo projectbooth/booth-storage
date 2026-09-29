@@ -18,13 +18,15 @@ securely. Other modules read, write and list through one generic API keyed by ba
 | Generic read/write/list API keyed by backend ID | `internal/api/server.go`, `internal/backend/backend.go` |
 | Manifest + health check | `charts/booth-storage/templates/boothmodule.yaml`, `/healthz` |
 | CI per `contracts/testing-strategy.md` | `.github/workflows/` |
+| `s3`-kind credential broker provider (ADR 0080/0088), off by default | `internal/credentialbroker`, `internal/backend/s3/credentials.go`, [decision 0006](docs/decisions/0006-s3-credential-broker-provider-design.md) |
 
 ## Stack
 
 Matches booth-core / booth-module-store: **Go** + `chi` + `go-oidc` backend; **React + TypeScript
 + Vite + Tailwind** UI in `web/`, published as `@projectbooth/storage-ui` (ADR 0030); Helm chart
 with a `BoothModule` manifest (ADR 0019). Additions: PostgreSQL via `pgx` for backend metadata
-(ADR 0014), `client-go` for credential Secrets. Go floor is **1.26** (current `client-go`
+(ADR 0014), `client-go` for credential Secrets, `madmin-go` for minting MinIO expiring service
+accounts (the ADR 0080/0088 credential-broker provider). Go floor is **1.26** (current `client-go`
 requires it; sibling repos are on 1.23 — each repo builds independently).
 
 ```
@@ -34,6 +36,7 @@ internal/backend/      the generic Backend interface + path rules; one package p
 internal/registry/     backends collection: service, Postgres + Kubernetes-Secret stores, filesystem policy
 internal/api/          HTTP routes (regular, data, admin)
 internal/auth/         OIDC verification + role checks (defense in depth)
+internal/credentialbroker/  ADR 0080/0088 credential-broker provider route (POST /internal/credentials)
 web/                   the UI package (regular view + admin view)
 charts/booth-storage/  Helm chart, BoothModule manifest, narrowly-scoped RBAC
 docs/decisions/        judgment calls the ADRs didn't settle — read these
@@ -107,6 +110,7 @@ route/view prop and renders no nav link to `adminNavPath`.
 - [0003](docs/decisions/0003-filesystem-backend-allow-list.md) — filesystem kind is off by default (ratified: ADR 0040).
 - [0004](docs/decisions/0004-role-header-trust.md) — the role is derived from the token's `groups` claim and an over-claiming `X-Booth-Role` is rejected with 403 (ADR 0041). **`oidc.groupsClaim` must match booth-core's**, or every request is refused.
 - [0005](docs/decisions/0005-workload-token-issuer.md) — optionally trusts booth-core's JWKS as a second token issuer for unattended-run (workload) tokens (ADR 0056); off unless `oidc.workloadIssuerUrl` is set.
+- [0006](docs/decisions/0006-s3-credential-broker-provider-design.md) — optionally mints short-lived `s3` credentials for the ADR 0080/0088 credential broker (real Iceberg/native access, e.g. booth-lakehouse); off unless `credentialBroker.enabled` is set, and only self-hosted MinIO-compatible backends can actually issue one today (real AWS S3 backends refuse every request — see the doc for why).
 
 ## Behaviors worth knowing
 
@@ -144,11 +148,12 @@ route/view prop and renders no nav link to `adminNavPath`.
   I didn't invent one. Today a consumer addresses an object as backend ID + path.
 - Deploying alongside a real, pinned booth-core (`test/integration/README.md`).
 - The layer-3 workflow has never been executed (no kind/k3d available when written).
-- Quotas, object copy (as distinct from move), and handing credentials to other modules — out of
-  v0 scope. The latter is coming as the `s3`-kind credential broker provider (ADR 0080); design
-  answers to `booth-lakehouse`'s AWS/MinIO constraints are recorded in
-  [decision 0006](docs/decisions/0006-s3-credential-broker-provider-design.md) ahead of
-  `booth-core`'s broker routing landing.
+- Quotas and object copy (as distinct from move) — out of v0 scope. Handing credentials to other
+  modules **is** built (the `s3`-kind credential broker provider, ADR 0080/0088 — off by default,
+  `credentialBroker.enabled`); see [decision 0006](docs/decisions/0006-s3-credential-broker-provider-design.md)
+  for what it does and doesn't support (MinIO-compatible backends only) and how it was verified.
+  Real AWS S3's `sts:AssumeRole` path for the general (session-token-allowed) shape is designed
+  but not implemented — no `assumeRoleArn` config exists yet, so those requests are refused too.
 - Nothing has run this module against a real booth-core's database provisioning yet: the chart
   declares `database: {enabled: true}` and reads `booth-database-credentials`/`dsn`, and CI
   exercises that with a hand-made Secret of the same shape, not one core wrote.

@@ -59,9 +59,10 @@ func run() error {
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: api.NewRouter(api.Deps{
-			Verifier:       verifier,
-			Registry:       registry.NewService(meta, creds, registry.FilesystemPolicy{Roots: cfg.FilesystemRoots}),
-			MaxUploadBytes: cfg.MaxUploadBytes,
+			Verifier:                   verifier,
+			Registry:                   registry.NewService(meta, creds, registry.FilesystemPolicy{Roots: cfg.FilesystemRoots}),
+			MaxUploadBytes:             cfg.MaxUploadBytes,
+			CredentialBrokerCredential: cfg.CredentialBrokerCredential,
 		}),
 		// Bound how long a client may take to send headers. Deliberately no overall
 		// Read/WriteTimeout: those would cut off large object uploads and downloads.

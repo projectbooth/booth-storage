@@ -34,6 +34,15 @@ spec:
   database:
     enabled: true
   {{- end }}
+  {{- if .Values.credentialBroker.enabled }}
+  # ADR 0080/0088: this module mints short-lived, scoped `s3` credentials for the credential
+  # broker. Declaring this is what makes core deliver the
+  # booth-credential-broker-provider-credentials Secret and route matching requests here;
+  # omitting it means core never routes to this module at all.
+  providesCredentials:
+    kinds:
+      - s3
+  {{- end }}
   serviceRef:
     name: {{ include "booth-storage.fullname" . }}
     port: {{ .Values.service.port }}

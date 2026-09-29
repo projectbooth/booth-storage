@@ -11,7 +11,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"BOOTH_HTTP_ADDR", "BOOTH_OIDC_ISSUER_URL", "BOOTH_OIDC_CLIENT_ID", "BOOTH_OIDC_REQUIRE_AUDIENCE",
 		"BOOTH_POSTGRES_DSN", "BOOTH_NAMESPACE", "BOOTH_STORAGE_FILESYSTEM_ROOTS",
 		"BOOTH_STORAGE_MAX_UPLOAD_BYTES", "BOOTH_STORAGE_DEV_MEMORY", "BOOTH_OIDC_GROUPS_CLAIM",
-		"BOOTH_WORKLOAD_ISSUER_URL",
+		"BOOTH_WORKLOAD_ISSUER_URL", "BOOTH_CREDENTIAL_BROKER_CREDENTIAL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -57,6 +57,20 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.OIDC.WorkloadIssuerURL != "" {
 		t.Errorf("workload issuer = %q, want none by default (the IdP is the only trusted issuer)", cfg.OIDC.WorkloadIssuerURL)
+	}
+	if cfg.CredentialBrokerCredential != "" {
+		t.Errorf("credential broker credential = %q, want empty by default (the route refuses every call)", cfg.CredentialBrokerCredential)
+	}
+}
+
+func TestLoad_CredentialBrokerCredential(t *testing.T) {
+	setEnv(t, with(map[string]string{"BOOTH_CREDENTIAL_BROKER_CREDENTIAL": "bcbp.storage.deadbeef"}))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CredentialBrokerCredential != "bcbp.storage.deadbeef" {
+		t.Errorf("credential broker credential = %q", cfg.CredentialBrokerCredential)
 	}
 }
 
