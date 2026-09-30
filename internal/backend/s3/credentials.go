@@ -31,7 +31,15 @@ var ErrScopeNotSupported = errors.New("this backend cannot issue a scoped s3 cre
 // request for less is clamped up to it, per the broker contract: a provider's documented
 // capability floor may clamp back past the broker's own TTL ceiling; that's the provider's
 // limit, not a violation of it.
-const minServiceAccountTTL = 15 * time.Minute
+//
+// The floor itself is a strict "greater than 15 minutes," not "at least" — verified directly
+// against a real server here: an expiration of exactly now+15m is rejected
+// ("invalid service account expiration"), now+15m1s succeeds. Clamping to exactly 15 minutes
+// lands right on that boundary, and the time the request actually spends in flight erodes the
+// margin further, so it fails intermittently depending on latency. booth-lakehouse's own
+// reference implementation (tests/integration/fakecore.py) already carries a few seconds of
+// slack for the same reason (`max(ttl, 905)`); this does the same, deliberately.
+const minServiceAccountTTL = 15*time.Minute + 5*time.Second
 
 // MintRequest is one scoped-credential ask, already authorized by the broker (ADR 0080: "a
 // provider never re-derives trust, it trusts the broker's forwarded, already-authorized

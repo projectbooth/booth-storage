@@ -125,11 +125,17 @@ placeholder.
 - **Real MinIO** (`TestMintScopedCredential_RealMinIO*`, same `BOOTH_TEST_S3_ENDPOINT`-gated
   pattern as `s3_test.go`): mints a real expiring service account, then uses the *minted*
   credential (not the admin's) to prove an in-scope object is readable, an out-of-scope one
-  isn't, a read-only grant can't write, and the TTL floor/ceiling clamp both directions —
-  **written but not executed in the environment this was built in**: `hack/docker-compose.
-  emulators.yml`'s MinIO image currently fails to pull at all (ADR 0087 — verified directly here
-  too, both `:latest` and a pinned digest 401 anonymously), the same fleet-wide break that ADR
-  documents. These tests skip cleanly without the emulator rather than faking green.
+  isn't, a read-only grant can't write, and the TTL floor/ceiling clamp both directions. Written
+  against a blocked emulator (ADR 0087) and not executable at the time; **run for real once ADR
+  0091's shared mirror (`ghcr.io/projectbooth/minio-test`) was published** — and it immediately
+  caught a real bug the design pass had no way to find without a real server: MinIO's 15-minute
+  floor is a *strict* `>`, not `≥`. Clamping to exactly `15 * time.Minute` landed right on that
+  boundary, and the time a request actually spends in flight was enough to push the arrival
+  below it, so `AddServiceAccount` failed with "invalid service account expiration" — not always
+  (it raced request latency), but reliably enough to fail outright in this environment. Fixed by
+  clamping to `15m5s`, matching the few seconds of slack `booth-lakehouse`'s own reference
+  implementation (`tests/integration/fakecore.py`'s `max(ttl, 905)`) already carries for the
+  identical reason. Full suite (this module's, real MinIO/Azurite/Postgres included) passes.
 - **Not attempted: a real cross-process test against `booth-core`'s actual binary.** Looked at
   seriously (core has a real dev mode — `BOOTH_DEV_REGISTRY_PATH` — that needs no Kubernetes
   cluster), but `internal/devregistry`'s file format has no field for `providesCredentials` at
