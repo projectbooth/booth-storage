@@ -1,4 +1,4 @@
 # Store and check out every text file with LF, whatever core.autocrlf says. hack/*.sh runs via
-# `sh` in CI (ubuntu-latest) and in a real container — a CRLF shebang/script breaks there even
+# `sh` in CI (ubuntu-24.04) and in a real container — a CRLF shebang/script breaks there even
 # though it's invisible on a Windows checkout. Same fix booth-logging uses, for the same reason.
 * text=auto eol=lf
