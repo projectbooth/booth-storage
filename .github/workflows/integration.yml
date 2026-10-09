@@ -77,15 +77,42 @@ jobs:
 
       - name: Verify /healthz through the Service (a 200 means migrations ran and Postgres is reachable)
         run: |
+          # `-i` is required here: `kubectl run --rm` refuses to run at all without an attached
+          # container ("--rm should only be used for attached containers"). This step's result is
+          # kubectl run's own exit code (curl -sf's, unretrieved via $(...)), never captured
+          # stdout text, so it isn't exposed to the attach-race fixed below.
           kubectl -n booth-storage run curl-check --rm -i --restart=Never --image=curlimages/curl -- \
             curl -sf http://booth-storage.booth-storage.svc.cluster.local:8080/healthz
 
       - name: Verify the API refuses unauthenticated requests in-cluster
         run: |
           # `kubectl run --rm` appends its own "pod deleted" line, so match rather than compare.
-          kubectl -n booth-storage run curl-authz --rm -i --restart=Never --image=curlimages/curl -- \
-            curl -s -o /dev/null -w 'status=%{http_code}' http://booth-storage.booth-storage.svc.cluster.local:8080/api/backends \
-            | grep -q 'status=401'
+          # `kubectl run --rm -i` has an observed, unrelated-to-this-repo race (same one
+          # booth-catalog hit and fixed, its integration.yml commits e979a63/3c1b330): when
+          # attach is slow to connect to a container as fast-finishing as `curl`, the
+          # container's real stdout can be missed entirely, and kubectl's OWN "All commands and
+          # output from this session will be recorded..." banner — which shares the same stdout
+          # stream — is all that ends up captured. A plain non-empty check doesn't catch this
+          # (the banner text is non-empty too); keep only a line that actually looks like our
+          # `status=NNN` response. Retry only when that's absent, with a unique pod name per
+          # attempt (a prior attempt's pod may still be deleting); once found, the 401 check
+          # runs exactly once, unretried, so a genuinely wrong status still fails the step.
+          status=""
+          for attempt in 1 2 3; do
+            raw="$(kubectl -n booth-storage run curl-authz-$attempt --rm -i --restart=Never --image=curlimages/curl -- \
+              curl -s -o /dev/null -w 'status=%{http_code}' http://booth-storage.booth-storage.svc.cluster.local:8080/api/backends || true)"
+            status="$(printf '%s\n' "$raw" | grep -o 'status=[0-9]\{3\}' | head -n1 || true)"
+            if [ -n "$status" ]; then
+              break
+            fi
+            echo "attempt $attempt: kubectl/curl returned no usable response (got: ${raw:-<nothing>}), retrying…" >&2
+            sleep 2
+          done
+          if [ -z "$status" ]; then
+            echo "no response after 3 attempts"; exit 1
+          fi
+          echo "$status"
+          echo "$status" | grep -q 'status=401'
 
       - name: Verify RBAC is exactly what ADR 0020 needs, and no more
         run: |
