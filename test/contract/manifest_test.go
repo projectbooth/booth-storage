@@ -298,6 +298,21 @@ func TestChart_WorkloadIssuer(t *testing.T) {
 	}
 }
 
+// The ADR 0108 key-fetch override is unconditionally rendered (like groupsClaim), empty by
+// default so ordinary discovery is unchanged, overridable per deployment.
+func TestChart_JWKSURL(t *testing.T) {
+	if !bytes.Contains(helmTemplate(t, "templates/deployment.yaml"), []byte("BOOTH_OIDC_JWKS_URL")) {
+		t.Fatal("BOOTH_OIDC_JWKS_URL not rendered")
+	}
+	if !regexp.MustCompile(`BOOTH_OIDC_JWKS_URL\s+value: ""`).Match(helmTemplate(t, "templates/deployment.yaml")) {
+		t.Error("default jwksUrl should be empty (ordinary discovery, unchanged)")
+	}
+	got := helmTemplate(t, "templates/deployment.yaml", "--set", "oidc.jwksUrl=http://keycloak.booth.svc:8080/realms/booth/protocol/openid-connect/certs")
+	if !bytes.Contains(got, []byte(`value: "http://keycloak.booth.svc:8080/realms/booth/protocol/openid-connect/certs"`)) {
+		t.Errorf("oidc.jwksUrl override not rendered:\n%s", got)
+	}
+}
+
 // Providing the ADR 0080/0088 credential broker is opt-in (docs/decisions/0006): neither the
 // manifest field nor the Secret-sourced env var appears unless the operator turns it on.
 func TestChart_CredentialBrokerDisabledByDefault(t *testing.T) {

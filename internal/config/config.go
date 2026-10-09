@@ -68,6 +68,8 @@ func Load() (Config, error) {
 			GroupsClaim:     getEnv("BOOTH_OIDC_GROUPS_CLAIM", auth.DefaultGroupsClaim),
 			// Optional: booth-core's issuer URL, to also accept its workload tokens (ADR 0056).
 			WorkloadIssuerURL: os.Getenv("BOOTH_WORKLOAD_ISSUER_URL"),
+			// Optional key-fetch override (ADR 0108): see auth.OIDCConfig.JWKSURL's doc comment.
+			JWKSURL: os.Getenv("BOOTH_OIDC_JWKS_URL"),
 		},
 	}
 

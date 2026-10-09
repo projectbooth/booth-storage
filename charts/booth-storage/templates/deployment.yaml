@@ -42,6 +42,8 @@ spec:
               value: {{ .Values.oidc.requireAudience | quote }}
             - name: BOOTH_OIDC_GROUPS_CLAIM
               value: {{ .Values.oidc.groupsClaim | quote }}
+            - name: BOOTH_OIDC_JWKS_URL
+              value: {{ .Values.oidc.jwksUrl | quote }}
             {{- with .Values.oidc.workloadIssuerUrl }}
             - name: BOOTH_WORKLOAD_ISSUER_URL
               value: {{ . | quote }}

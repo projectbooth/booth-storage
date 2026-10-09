@@ -26,6 +26,14 @@ oidc:
   # read from <url>/.well-known/jwks.json. Empty trusts the OIDC provider only. Must differ
   # from issuerUrl.
   workloadIssuerUrl: ""
+  # Optional key-fetch override (ADR 0108): when set, this module fetches signing keys from
+  # this URL directly instead of the issuer's own discovery document, while still validating
+  # `iss` exactly against issuerUrl. A bundled-Keycloak install sets this automatically to
+  # Keycloak's in-cluster Service over plain http, so this module never needs to trust a
+  # self-signed Ingress certificate just to verify tokens. Setting this without issuerUrl is
+  # a startup error. Empty (the default) means ordinary discovery, unchanged — this is what
+  # every external-provider install uses today.
+  jwksUrl: ""
 
 # Backend metadata (which backends exist, how they're configured — never credentials)
 # lives in this module's own database on the shared PostgreSQL cluster (ADR 0014).
