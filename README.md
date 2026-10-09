@@ -128,6 +128,15 @@ route/view prop and renders no nav link to `adminNavPath`.
   creates anything.
 - **A path that runs through a file is not a server error.** `?prefix=` naming a file lists as
   empty, reading through one is `404`, and creating beneath one is `409` — the same on every kind.
+- **Key-fetch override (ADR 0108).** `oidc.jwksUrl` (env `BOOTH_OIDC_JWKS_URL`) is optional and
+  empty by default, meaning ordinary OIDC discovery against `oidc.issuerUrl` — unchanged. When
+  set, this module skips discovery entirely and fetches signing keys directly from that URL
+  instead, while still validating `iss` against `oidc.issuerUrl` exactly; this is for a bundled
+  install where the issuer is a browser-facing `https://` URL behind a self-signed Ingress
+  certificate no pod should need to trust, so keys are fetched from the identity provider's
+  in-cluster Service over plain `http://` instead. **Trust assumption:** that key fetch is
+  in-cluster and unauthenticated — it relies on NetworkPolicy and cluster trust, not on anything
+  this field itself enforces. Setting it without `oidc.issuerUrl` is a startup error.
 
 ## Not done
 

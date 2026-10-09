@@ -1,13 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,6 +265,115 @@ func TestNewVerifier_UnreachableIssuer(t *testing.T) {
 	defer cancel()
 	if _, err := NewVerifier(ctx, OIDCConfig{IssuerURL: "http://127.0.0.1:1"}); err == nil {
 		t.Error("NewVerifier succeeded against an unreachable issuer")
+	}
+}
+
+// newJWKSOnlyIdP is fakeIdP's shape but serves only /jwks, no discovery document at all — a
+// request to discovery fails the test outright, so it exercises the ADR 0108 key-fetch
+// override (OIDCConfig.JWKSURL), which must never touch discovery.
+func newJWKSOnlyIdP(t *testing.T) *fakeIdP {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idp := &fakeIdP{key: key}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
+	})
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("discovery was fetched even though JWKSURL was set — the key-fetch override must bypass it entirely")
+		w.WriteHeader(http.StatusNotFound)
+	})
+	idp.server = httptest.NewServer(mux)
+	t.Cleanup(idp.server.Close)
+	return idp
+}
+
+// This is ADR 0108's central claim: a verifying service can fetch signing keys from a
+// plain-http, purely-in-cluster URL while the token's `iss` is an https URL this process
+// cannot even reach — proving the key fetch and the issuer check are genuinely decoupled,
+// not just configured with different-looking strings that happen to agree.
+func TestVerifier_JWKSURLOverride(t *testing.T) {
+	jwksOnly := newJWKSOnlyIdP(t)
+	const unreachableHTTPSIssuer = "https://booth.home.arpa.invalid/realms/booth"
+
+	v, err := NewVerifier(context.Background(), OIDCConfig{
+		IssuerURL: unreachableHTTPSIssuer,
+		JWKSURL:   jwksOnly.server.URL + "/jwks",
+		ClientID:  "booth-storage",
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	tok := jwksOnly.token(t, tokenOpts{issuer: unreachableHTTPSIssuer, subject: "alice", groups: []string{"/workspaces/acme/owner"}})
+	claims, err := v.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if claims.Subject != "alice" || RoleInWorkspace(claims.Groups, "acme") != RoleOwner {
+		t.Errorf("claims = %+v", claims)
+	}
+}
+
+// `iss` is still validated exactly even when keys come from a separate URL: a token signed
+// by the same key but claiming a different issuer must still be rejected.
+func TestVerifier_JWKSURLStillValidatesIssuerExactly(t *testing.T) {
+	jwksOnly := newJWKSOnlyIdP(t)
+
+	v, err := NewVerifier(context.Background(), OIDCConfig{
+		IssuerURL: "https://booth.home.arpa.invalid/realms/booth",
+		JWKSURL:   jwksOnly.server.URL + "/jwks",
+		ClientID:  "booth-storage",
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	tok := jwksOnly.token(t, tokenOpts{issuer: "https://wrong-issuer.invalid/realms/booth", subject: "alice"})
+	if _, err := v.Verify(context.Background(), tok); err == nil {
+		t.Fatal("expected an issuer-mismatch error, got nil")
+	}
+}
+
+// ADR 0108: the effective issuer and key source are logged once at startup, so an operator
+// can see which key source is actually in effect without reading config.
+func TestNewVerifier_LogsIssuerAndKeySourceOnce(t *testing.T) {
+	jwksOnly := newJWKSOnlyIdP(t)
+	const issuer = "https://booth.home.arpa.invalid/realms/booth"
+
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	if _, err := NewVerifier(context.Background(), OIDCConfig{
+		IssuerURL: issuer,
+		JWKSURL:   jwksOnly.server.URL + "/jwks",
+		ClientID:  "booth-storage",
+	}); err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Count(out, "oidc: verifying tokens") != 1 {
+		t.Fatalf("expected exactly one startup log line, got: %q", out)
+	}
+	if !strings.Contains(out, issuer) {
+		t.Errorf("log line does not mention the issuer: %q", out)
+	}
+	if !strings.Contains(out, jwksOnly.server.URL+"/jwks") {
+		t.Errorf("log line does not mention the effective key URL: %q", out)
+	}
+}
+
+func TestNewVerifier_RejectsJWKSURLWithoutIssuerURL(t *testing.T) {
+	jwksOnly := newJWKSOnlyIdP(t)
+	if _, err := NewVerifier(context.Background(), OIDCConfig{JWKSURL: jwksOnly.server.URL + "/jwks", ClientID: "booth-storage"}); err == nil {
+		t.Error("NewVerifier accepted JWKSURL without IssuerURL")
 	}
 }
 

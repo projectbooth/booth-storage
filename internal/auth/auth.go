@@ -72,6 +72,18 @@ type OIDCConfig struct {
 	// token carries the same audience and groups claim as a human's, so everything downstream
 	// of verification is unchanged. Empty (the default) trusts the identity provider only.
 	WorkloadIssuerURL string
+	// JWKSURL, if set, overrides where signing keys for the *primary* identity provider
+	// (IssuerURL) are fetched from (ADR 0108): instead of discovery against IssuerURL, keys
+	// are fetched directly from this URL, while `iss` is still validated exactly against
+	// IssuerURL. This lets a deployment point this module at an in-cluster, unauthenticated
+	// key endpoint (e.g. Keycloak's own Service, over plain http) while the issuer itself is
+	// a browser-facing https URL behind a self-signed-certificate Ingress — no pod needs to
+	// trust that certificate. Empty (the default, and every external-provider install) means
+	// ordinary discovery, unchanged. Security note: this fetch is unauthenticated and
+	// unencrypted, so it relies on NetworkPolicy and cluster trust, not on anything this
+	// field itself enforces. Does not affect WorkloadIssuerURL, which already fetches its
+	// keys directly and was never discovery-based.
+	JWKSURL string
 }
 
 // DefaultGroupsClaim matches booth-core's default (ADR 0025).
@@ -93,10 +105,13 @@ type Verifier struct {
 }
 
 func NewVerifier(ctx context.Context, cfg OIDCConfig) (*Verifier, error) {
-	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
-	if err != nil {
-		return nil, fmt.Errorf("oidc discovery against %s: %w", cfg.IssuerURL, err)
+	// config.Load already rejects JWKSURL set without IssuerURL (BOOTH_OIDC_ISSUER_URL is
+	// required unconditionally there), but this is also a usable library entry point on its
+	// own, so the check is repeated here.
+	if cfg.JWKSURL != "" && cfg.IssuerURL == "" {
+		return nil, fmt.Errorf("oidc.jwksUrl is set but oidc.issuerUrl is empty: the issuer is still required to validate `iss`")
 	}
+
 	claim := cfg.GroupsClaim
 	if claim == "" {
 		claim = DefaultGroupsClaim
@@ -105,8 +120,29 @@ func NewVerifier(ctx context.Context, cfg OIDCConfig) (*Verifier, error) {
 		SkipClientIDCheck: !cfg.RequireAudience,
 		ClientID:          cfg.ClientID,
 	}
+
+	// Ordinarily this fetches the provider's discovery document and uses its own
+	// self-reported jwks_uri. If cfg.JWKSURL is set (ADR 0108), discovery is skipped
+	// entirely and keys are fetched directly from that URL instead; `iss` is still
+	// validated exactly against cfg.IssuerURL either way — only where keys are physically
+	// fetched from changes.
+	var idTokenVerifier *oidc.IDTokenVerifier
+	keysFrom := "discovery (" + cfg.IssuerURL + "/.well-known/openid-configuration)"
+	if cfg.JWKSURL != "" {
+		keySet := oidc.NewRemoteKeySet(ctx, cfg.JWKSURL)
+		idTokenVerifier = oidc.NewVerifier(cfg.IssuerURL, keySet, verifierConfig)
+		keysFrom = cfg.JWKSURL
+	} else {
+		provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+		if err != nil {
+			return nil, fmt.Errorf("oidc discovery against %s: %w", cfg.IssuerURL, err)
+		}
+		idTokenVerifier = provider.Verifier(verifierConfig)
+	}
+	log.Printf("oidc: verifying tokens with issuer=%s keys-from=%s", cfg.IssuerURL, keysFrom)
+
 	v := &Verifier{
-		byIssuer:    map[string]*oidc.IDTokenVerifier{cfg.IssuerURL: provider.Verifier(verifierConfig)},
+		byIssuer:    map[string]*oidc.IDTokenVerifier{cfg.IssuerURL: idTokenVerifier},
 		groupsClaim: claim,
 	}
 	// Core strips a trailing slash from its issuer URL, so match that form in `iss`.

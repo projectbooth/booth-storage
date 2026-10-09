@@ -11,7 +11,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"BOOTH_HTTP_ADDR", "BOOTH_OIDC_ISSUER_URL", "BOOTH_OIDC_CLIENT_ID", "BOOTH_OIDC_REQUIRE_AUDIENCE",
 		"BOOTH_POSTGRES_DSN", "BOOTH_NAMESPACE", "BOOTH_STORAGE_FILESYSTEM_ROOTS",
 		"BOOTH_STORAGE_MAX_UPLOAD_BYTES", "BOOTH_STORAGE_DEV_MEMORY", "BOOTH_OIDC_GROUPS_CLAIM",
-		"BOOTH_WORKLOAD_ISSUER_URL", "BOOTH_CREDENTIAL_BROKER_CREDENTIAL",
+		"BOOTH_WORKLOAD_ISSUER_URL", "BOOTH_CREDENTIAL_BROKER_CREDENTIAL", "BOOTH_OIDC_JWKS_URL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -60,6 +60,20 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.CredentialBrokerCredential != "" {
 		t.Errorf("credential broker credential = %q, want empty by default (the route refuses every call)", cfg.CredentialBrokerCredential)
+	}
+	if cfg.OIDC.JWKSURL != "" {
+		t.Errorf("JWKS URL = %q, want empty by default (ordinary discovery, unchanged)", cfg.OIDC.JWKSURL)
+	}
+}
+
+func TestLoad_JWKSURL(t *testing.T) {
+	setEnv(t, with(map[string]string{"BOOTH_OIDC_JWKS_URL": "http://keycloak.booth.svc:8080/realms/booth/protocol/openid-connect/certs"}))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OIDC.JWKSURL != "http://keycloak.booth.svc:8080/realms/booth/protocol/openid-connect/certs" {
+		t.Errorf("JWKS URL = %q", cfg.OIDC.JWKSURL)
 	}
 }
 
