@@ -77,13 +77,21 @@ jobs:
 
       - name: Verify /healthz through the Service (a 200 means migrations ran and Postgres is reachable)
         run: |
-          kubectl -n booth-storage run curl-check --rm -i --restart=Never --image=curlimages/curl -- \
+          kubectl -n booth-storage run curl-check --rm --restart=Never --image=curlimages/curl -- \
             curl -sf http://booth-storage.booth-storage.svc.cluster.local:8080/healthz
 
       - name: Verify the API refuses unauthenticated requests in-cluster
         run: |
           # `kubectl run --rm` appends its own "pod deleted" line, so match rather than compare.
-          kubectl -n booth-storage run curl-authz --rm -i --restart=Never --image=curlimages/curl -- \
+          # No `-i`: this pod is never sent stdin, but `-i` still makes kubectl open a live
+          # attach session to stream it (the exact thing the flag is for) — fragile for a pod
+          # that exits as fast as this curl does, and lossy specifically on the pod's stdout,
+          # which this step greps. Confirmed by a real failure here (run 37876107225): the pod
+          # itself answered 401 (its own access log proved it), but kubectl's attach never
+          # echoed that line before the pod was already gone, so grep saw nothing. Dropping
+          # `-i` takes the simpler non-attach code path, which only needs the exit code for
+          # curl-check above and doesn't depend on a live stream being lucky.
+          kubectl -n booth-storage run curl-authz --rm --restart=Never --image=curlimages/curl -- \
             curl -s -o /dev/null -w 'status=%{http_code}' http://booth-storage.booth-storage.svc.cluster.local:8080/api/backends \
             | grep -q 'status=401'
 
