@@ -3,7 +3,11 @@ name: Release
 # Publishes the container image and the Helm chart at a matching version, so
 # booth-module-store's bundled catalog (and anyone installing via booth-core's install
 # API) has a real chart reference to point at, and other repos' layer-3 tests can pin to a
-# known-good build instead of main. Mirrors booth-core's release workflow.
+# known-good build instead of main. Mirrors booth-core's release workflow, including the
+# OCI chart push (ADR 0111): the chart is published both as a GitHub release asset (for
+# offline use) and as oci://ghcr.io/projectbooth/charts/booth-storage at the tagged
+# version, which is the form booth-core's install API and a real `helm install` both
+# actually need (ADR 0028's ParseChartRef only understands oci://host/path/chart-name).
 # Pushing a `vX.Y.Z` tag triggers it.
 on:
   push:
@@ -62,3 +66,9 @@ jobs:
         with:
           files: dist/*.tgz
           generate_release_notes: true
+
+      - name: helm registry login (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Push chart as an OCI artifact (ADR 0111)
+        run: helm push dist/booth-storage-${{ needs.image.outputs.version }}.tgz oci://ghcr.io/projectbooth/charts
