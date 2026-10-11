@@ -121,6 +121,15 @@ jobs:
             --set oidc.clientId=booth-storage \
             --set 'filesystem.roots[0]=/data/{workspace}' > /dev/null
 
+      - name: helm package + template the packaged .tgz (what release.yml actually ships, ADR 0111)
+        # Linting and templating the chart in place (above) doesn't exercise `helm package`
+        # itself — release.yml's actual artifact — so a packaging regression (a stray file,
+        # a schema issue package catches that lint doesn't) could reach a tag unnoticed.
+        working-directory: charts/booth-storage
+        run: |
+          helm package . --version 0.0.0-ci --app-version 0.0.0-ci --destination /tmp/ci-package
+          helm template test-release /tmp/ci-package/booth-storage-0.0.0-ci.tgz > /dev/null
+
   image-build:
     # Catches a broken Dockerfile on the PR that breaks it, not at release time. Not pushed.
     runs-on: ubuntu-24.04
