@@ -8,10 +8,13 @@ package contract
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -337,5 +340,88 @@ func TestChart_CredentialBrokerEnabled(t *testing.T) {
 	dep := helmTemplate(t, "templates/deployment.yaml", "--set", "credentialBroker.enabled=true")
 	if !regexp.MustCompile(`secretKeyRef:\s+name: booth-credential-broker-provider-credentials\s+key: credential`).Match(dep) {
 		t.Errorf("BOOTH_CREDENTIAL_BROKER_CREDENTIAL is not read from booth-credential-broker-provider-credentials/credential:\n%s", dep)
+	}
+}
+
+// valueAtPath walks a dotted values.yaml path (e.g. "oidc.jwksUrl") through a generic
+// YAML tree and reports whether it resolves to a leaf (which is all core's merge needs:
+// a default to be absent-or-present under, per ADR 0113 item 8).
+func valueAtPath(root map[string]any, dotted string) (any, bool) {
+	cur := any(root)
+	for _, part := range strings.Split(dotted, ".") {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = m[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// TestChart_IdentityKeysAnnotation is the ADR 0113 / module-manifest.md "Chart
+// annotation: identity keys" contract check: the annotation must be valid JSON, and
+// every path it names must actually exist (with a default) in values.yaml, or core's
+// install-time merge (and a plain `helm template`/CLI install) would silently do nothing
+// for a typo'd path.
+func TestChart_IdentityKeysAnnotation(t *testing.T) {
+	chartBytes, err := os.ReadFile(filepath.Join("..", "..", "charts", "booth-storage", "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chart struct {
+		Annotations map[string]string `yaml:"annotations"`
+	}
+	if err := yaml.Unmarshal(chartBytes, &chart); err != nil {
+		t.Fatalf("parsing Chart.yaml: %v", err)
+	}
+	raw, ok := chart.Annotations["booth.projectbooth.io/identity-keys"]
+	if !ok {
+		t.Fatal("Chart.yaml is missing the booth.projectbooth.io/identity-keys annotation (ADR 0113)")
+	}
+
+	var mapping map[string]string
+	if err := json.Unmarshal([]byte(raw), &mapping); err != nil {
+		t.Fatalf("booth.projectbooth.io/identity-keys is not valid JSON: %v\nvalue: %s", err, raw)
+	}
+	if len(mapping) == 0 {
+		t.Fatal("booth.projectbooth.io/identity-keys decoded to an empty object")
+	}
+
+	knownKeys := map[string]bool{
+		"issuerUrl": true, "clientId": true, "jwksUrl": true,
+		"workloadIssuerUrl": true, "groupsClaim": true, "iframeIssuerUrl": true,
+	}
+
+	valuesBytes, err := os.ReadFile(filepath.Join("..", "..", "charts", "booth-storage", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(valuesBytes, &values); err != nil {
+		t.Fatalf("parsing values.yaml: %v", err)
+	}
+
+	for key, path := range mapping {
+		if !knownKeys[key] {
+			t.Errorf("identity-keys annotation names unknown shared setting %q (want one of issuerUrl, clientId, jwksUrl, workloadIssuerUrl, groupsClaim, iframeIssuerUrl)", key)
+		}
+		if _, ok := valueAtPath(values, path); !ok {
+			t.Errorf("identity-keys annotation maps %q to values.yaml path %q, which has no default in values.yaml", key, path)
+		}
+	}
+
+	for _, want := range []struct{ sharedKey, path string }{
+		{"issuerUrl", "oidc.issuerUrl"},
+		{"clientId", "oidc.clientId"},
+		{"jwksUrl", "oidc.jwksUrl"},
+		{"workloadIssuerUrl", "oidc.workloadIssuerUrl"},
+		{"groupsClaim", "oidc.groupsClaim"},
+	} {
+		if got := mapping[want.sharedKey]; got != want.path {
+			t.Errorf("identity-keys[%q] = %q, want %q", want.sharedKey, got, want.path)
+		}
 	}
 }
