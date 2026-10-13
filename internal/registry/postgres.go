@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/projectbooth/booth-storage/internal/backend"
+	"github.com/projectbooth/booth-storage/internal/dbwait"
 )
 
 //go:embed migrations/*.sql
@@ -31,13 +32,18 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgresStore connects to dsn and applies any pending migrations.
+// NewPostgresStore connects to dsn and applies any pending migrations. The first ping is
+// retried through a brief, transient refusal (ARCHITECTURE.md item 66(c): a freshly-scheduled
+// pod's first connections to the bundled PostgreSQL can be refused for a few seconds while the
+// NetworkPolicy allow set catches up) rather than treated as fatal.
 func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to postgres: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
+	if err := dbwait.Retry(ctx, "pinging postgres", dbwait.DefaultMaxElapsed, func() error {
+		return pool.Ping(ctx)
+	}); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("pinging postgres: %w", err)
 	}
