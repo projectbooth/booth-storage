@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
@@ -249,10 +251,16 @@ func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend
 
 	// UploadStream stages blocks and commits the block list only once the whole stream
 	// has been read, so a failed upload leaves uncommitted blocks that expire on their
-	// own and never a visible partial blob.
+	// own and never a visible partial blob. The access condition is enforced by the
+	// service on that same commit (Put Block List), not checked by this client first.
 	uploadOpts := &blockblob.UploadStreamOptions{}
 	if opts.ContentType != "" {
 		uploadOpts.HTTPHeaders = &blob.HTTPHeaders{BlobContentType: &opts.ContentType}
+	}
+	if opts.CreateOnly {
+		uploadOpts.AccessConditions = &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(azcore.ETagAny)},
+		}
 	}
 	if _, err := blockClient.UploadStream(ctx, r, uploadOpts); err != nil {
 		return backend.ObjectInfo{}, describe(err)
@@ -387,6 +395,10 @@ func describe(err error) error {
 	case bloberror.HasCode(err, bloberror.AuthenticationFailed, bloberror.AuthorizationFailure,
 		bloberror.AuthorizationPermissionMismatch, bloberror.InvalidAuthenticationInfo):
 		return errors.New("access denied by Azure Blob Storage — check the account key / SAS token and its permissions")
+	case bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet):
+		// Azure answers a failed create-only commit with either code depending on the
+		// operation; both mean the same thing here: the blob already exists.
+		return backend.ErrPreconditionFailed
 	}
 	return err
 }

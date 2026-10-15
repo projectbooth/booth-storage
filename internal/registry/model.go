@@ -61,10 +61,27 @@ type Record struct {
 	Config      json.RawMessage `json:"config"`
 	// HasCredentials records whether a credential Secret was written for this backend,
 	// so the admin view can show "credentials set" without reading the Secret.
-	HasCredentials bool      `json:"hasCredentials"`
-	CreatedBy      string    `json:"createdBy,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	HasCredentials bool `json:"hasCredentials"`
+	// CreateOnlyVerified records whether this backend has passed the one-time
+	// create-only capability probe (ADR 0117 point 8a): only meaningful for an S3
+	// backend, where honouring "If-None-Match: *" depends on the specific
+	// S3-compatible server, not on this module's SDK. Set by Service.TestSaved, and
+	// reset to false whenever the backend's Config changes (a different endpoint or
+	// bucket is an unproven server until tested again). Ignored for every other kind —
+	// see SupportsCreateOnly.
+	CreateOnlyVerified bool      `json:"-"`
+	CreatedBy          string    `json:"createdBy,omitempty"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// SupportsCreateOnly reports whether a create-only write (ADR 0117 point 8) may be
+// attempted against rec right now. Filesystem, Azure and GCS are always reliable — their
+// atomicity comes from the OS or the service's own documented, enforced precondition, not
+// from anything this module has to prove. An S3 backend is only as reliable as whichever
+// S3-compatible server an operator registered, so it needs CreateOnlyVerified first.
+func SupportsCreateOnly(rec Record) bool {
+	return rec.Kind != backend.KindS3 || rec.CreateOnlyVerified
 }
 
 // MetadataStore persists Records. Implementations must be safe for concurrent use and
@@ -77,10 +94,15 @@ type MetadataStore interface {
 	// List returns every record in the workspace, ordered by ID.
 	List(ctx context.Context, workspace string) ([]Record, error)
 	// Update replaces the mutable fields (DisplayName, Config, HasCredentials,
-	// UpdatedAt) of an existing record, returning ErrNotFound if absent.
+	// CreateOnlyVerified, UpdatedAt) of an existing record, returning ErrNotFound if absent.
 	Update(ctx context.Context, r Record) error
 	// Delete returns ErrNotFound if absent.
 	Delete(ctx context.Context, workspace, id string) error
+	// SetCreateOnlyVerified records the outcome of the create-only capability probe
+	// (ADR 0117 point 8a) without touching UpdatedAt — it is a fact learned about the
+	// backend, not an edit to it, so it must not invalidate the Open cache or bump the
+	// record's "last changed" story. ErrNotFound if absent.
+	SetCreateOnlyVerified(ctx context.Context, workspace, id string, verified bool) error
 	// Ping reports whether the store is reachable, for the health check.
 	Ping(ctx context.Context) error
 }

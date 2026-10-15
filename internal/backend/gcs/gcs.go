@@ -179,7 +179,13 @@ func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	w := b.bucket.Object(b.prefix + clean).NewWriter(wctx)
+	obj := b.bucket.Object(b.prefix + clean)
+	if opts.CreateOnly {
+		// Enforced by the real GCS service at commit (the Writer's final request), not
+		// checked by this client first.
+		obj = obj.If(storage.Conditions{DoesNotExist: true})
+	}
+	w := obj.NewWriter(wctx)
 	w.ContentType = opts.ContentType
 	if _, err := io.Copy(w, r); err != nil {
 		cancel()
@@ -290,6 +296,8 @@ func describe(err error) error {
 			return errors.New("access denied by Google Cloud Storage — check the service account and its bucket permissions")
 		case http.StatusNotFound:
 			return errors.New("bucket does not exist")
+		case http.StatusPreconditionFailed:
+			return backend.ErrPreconditionFailed
 		}
 	}
 	return err

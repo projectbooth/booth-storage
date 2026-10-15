@@ -43,6 +43,18 @@ export function usePathname(): string {
   );
 }
 
+/** The current query string (including the leading "?", or "" if none), for a one-time
+ *  prefill read from a link like booth-streamlit's "Write targets" panel links into this
+ *  one with. Returned as the raw string, not a parsed URLSearchParams, so the snapshot is
+ *  a primitive useSyncExternalStore can compare with Object.is — parse it where it's used. */
+export function useSearch(): string {
+  return useSyncExternalStore(
+    subscribe,
+    () => window.location.search,
+    () => "",
+  );
+}
+
 /** Navigates to `path` inside the shell without a page reload.
  *
  *  A full reload would drop booth-design's in-memory access token (ADR 0032) and force a

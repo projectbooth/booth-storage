@@ -444,6 +444,74 @@ func TestMiddleware(t *testing.T) {
 	}
 }
 
+// ADR 0117 item 1a: booth-streamlit's revoke-only grants-service identity. The token it
+// presents legitimately carries a viewer-capped groups claim (core mints it that way),
+// but this module must recognize the subject/booth_module shape and grant it neither
+// that nor any other ordinary role.
+func TestMiddleware_GrantsServiceIdentity(t *testing.T) {
+	var seen Identity
+	verifier := stubVerifier{
+		"grants-token": {Subject: "streamlit:acme:grants", Groups: []string{"/workspaces/acme/viewer"}, BoothModule: "streamlit"},
+		// Same subject shape, but not actually minted for the streamlit module: must not
+		// be recognized as the grants-service identity just because the subject matches.
+		"impersonated": {Subject: "streamlit:acme:grants", Groups: []string{"/workspaces/acme/viewer"}, BoothModule: "pipeline"},
+		// A module's own ordinary app token must not be mistaken for this identity either.
+		"ordinary-app": {Subject: "streamlit:acme:app1", Groups: []string{"/workspaces/acme/viewer"}, BoothModule: "streamlit"},
+	}
+	handler := Middleware(verifier)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen, _ = FromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	do := func(token, workspace string) *httptest.ResponseRecorder {
+		seen = Identity{}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		if workspace != "" {
+			req.Header.Set(HeaderBoothWorkspace, workspace)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := do("grants-token", "acme")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body)
+	}
+	if seen.Subject != "streamlit:acme:grants" || seen.Workspace != "acme" || seen.Role != RoleGrantsService {
+		t.Errorf("identity = %+v", seen)
+	}
+	if seen.CanRead() || seen.CanWrite() || seen.IsAdmin() {
+		t.Errorf("the grants-service identity satisfies an ordinary role check: %+v", seen)
+	}
+	if !seen.IsGrantsService() {
+		t.Error("IsGrantsService() = false for the recognized identity")
+	}
+
+	// The header must match the token's own embedded workspace — never trusted alone.
+	if rec := do("grants-token", "globex"); rec.Code != http.StatusForbidden {
+		t.Errorf("mismatched workspace header: status = %d, want 403", rec.Code)
+	}
+
+	// A wrong booth_module falls through to the ordinary role path: the token's own
+	// groups claim still grants plain viewer access, same as any other viewer token —
+	// it is simply never treated as the grants-service identity.
+	if rec := do("impersonated", "acme"); rec.Code != http.StatusOK || seen.Role != RoleViewer {
+		t.Errorf("wrong booth_module: status = %d, role = %q, want 200/viewer", rec.Code, seen.Role)
+	}
+	if seen.IsGrantsService() {
+		t.Error("a token from the wrong module was recognized as the grants-service identity")
+	}
+
+	do("ordinary-app", "acme")
+	if seen.IsGrantsService() {
+		t.Error("an ordinary app token was recognized as the grants-service identity")
+	}
+	if seen.Role != RoleViewer {
+		t.Errorf("ordinary app token role = %q, want viewer (unaffected by this feature)", seen.Role)
+	}
+}
+
 func TestRolePermissions(t *testing.T) {
 	cases := []struct {
 		role                     Role

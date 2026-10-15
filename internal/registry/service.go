@@ -173,6 +173,10 @@ func (s *Service) prepareUpdate(ctx context.Context, workspace, id string, in Up
 			return preparedUpdate{}, err
 		}
 		rec.Config = cfg
+		// A changed config may point at a different server entirely (a new endpoint, a
+		// different bucket); any earlier create-only capability probe (ADR 0117 point 8a)
+		// proved nothing about it. TestSaved re-proves it on request.
+		rec.CreateOnlyVerified = false
 	}
 
 	p := preparedUpdate{rec: rec, creds: in.Credentials, replaceCreds: in.Credentials != nil, newCreds: in.Credentials}
@@ -381,13 +385,31 @@ func (s *Service) Test(ctx context.Context, workspace string, in CreateInput) er
 	return b.Check(ctx)
 }
 
-// TestSaved checks connectivity for an already-registered backend.
+// TestSaved checks connectivity for an already-registered backend. For an S3 backend it
+// also runs the create-only capability probe (ADR 0117 point 8a) and records the result,
+// so SupportsCreateOnly can answer without touching the network on every write. The probe
+// outcome never affects this call's own ok/error result — a backend can be perfectly
+// reachable and still not honour "If-None-Match: *"; that is reported by the record's
+// CreateOnlyVerified field (the admin view), not by this test.
 func (s *Service) TestSaved(ctx context.Context, workspace, id string) error {
 	b, err := s.Open(ctx, workspace, id)
 	if err != nil {
 		return err
 	}
-	return b.Check(ctx)
+	if err := b.Check(ctx); err != nil {
+		return err
+	}
+	rec, err := s.Get(ctx, workspace, id)
+	if err != nil {
+		return err
+	}
+	if rec.Kind == backend.KindS3 {
+		verified := probeCreateOnly(ctx, b) == nil
+		if serr := s.meta.SetCreateOnlyVerified(ctx, workspace, id, verified); serr != nil {
+			log.Printf("registry: recording create-only probe result for %s: %v", key(workspace, id), serr)
+		}
+	}
+	return nil
 }
 
 // asTestFailure turns a root-directory validation problem into a plain error. Registering

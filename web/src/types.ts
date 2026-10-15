@@ -25,6 +25,10 @@ export interface AdminBackend extends BackendSummary {
   config: Record<string, unknown>;
   credentialsSet: boolean;
   createdBy?: string;
+  /** Whether a create-only upload (ADR 0117 point 8) can be admitted against this
+   *  backend right now. Always true except an S3 backend that hasn't yet passed the
+   *  create-only capability probe ("Test" on the Backends panel runs it). */
+  createOnlySupported?: boolean;
 }
 
 export interface ObjectEntry {
@@ -65,4 +69,31 @@ export interface UpdateBackendRequest {
 export interface TestResult {
   ok: boolean;
   error?: string;
+}
+
+// ---- upload grants (ADR 0117 "Reconciled design" item 1/8a) ----------------
+// Mirrors docs/contracts/upload-grants.md.
+
+/** One app's permission to make a create-only write into one backend prefix. */
+export interface UploadGrant {
+  id: string;
+  workspace: string;
+  /** The app's workload-token subject: "streamlit:<workspace>:<appId>". */
+  principal: string;
+  backendId: string;
+  /** "" (the backend root) or ends in "/". */
+  prefix: string;
+  /** Lowercase, no leading dot, e.g. ["csv", "png"]. */
+  extensions: string[];
+  maxBytes: number;
+  grantedBy: string;
+  createdAt: string;
+}
+
+export interface CreateUploadGrantRequest {
+  principal: string;
+  backendId: string;
+  prefix: string;
+  extensions: string[];
+  maxBytes: number;
 }

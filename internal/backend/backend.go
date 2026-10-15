@@ -48,6 +48,10 @@ var (
 	// ErrConflict means the operation would clobber something that already exists (a move
 	// onto an existing object or folder, or a folder where a file is).
 	ErrConflict = errors.New("already exists")
+	// ErrPreconditionFailed means a WriteOptions.CreateOnly write found an object already
+	// at the path (ADR 0117 point 8/8a). Distinct from ErrConflict (move/folder clobber):
+	// a caller branches on this one to answer 412, not 409.
+	ErrPreconditionFailed = errors.New("object already exists (create-only write)")
 )
 
 // ObjectInfo describes one entry returned by List/Read/Write. Path is always relative
@@ -111,6 +115,13 @@ type ListResult struct {
 // WriteOptions carries optional metadata for a Write.
 type WriteOptions struct {
 	ContentType string
+	// CreateOnly requires the write to fail with ErrPreconditionFailed rather than
+	// replace an existing object at path (ADR 0117 point 8: "If-None-Match: *", 412 if
+	// the object exists). Every kind enforces this atomically, using that kind's own
+	// native precondition (filesystem: a hard link into place; S3, Azure, GCS: their own
+	// conditional-write precondition) — never by checking existence first and writing
+	// second, which would leave a race between the two.
+	CreateOnly bool
 }
 
 // Backend is the generic storage surface. Implementations must be safe for concurrent
@@ -124,9 +135,9 @@ type Backend interface {
 	// missing object yields ErrNotFound.
 	Read(ctx context.Context, path string) (io.ReadCloser, ObjectInfo, error)
 
-	// Write stores r's bytes at path, replacing any existing object, and returns the
-	// stored object's info. A failed or interrupted write must not leave a partial
-	// object visible under path.
+	// Write stores r's bytes at path, replacing any existing object (unless
+	// opts.CreateOnly, see WriteOptions), and returns the stored object's info. A failed
+	// or interrupted write must not leave a partial object visible under path.
 	Write(ctx context.Context, path string, r io.Reader, opts WriteOptions) (ObjectInfo, error)
 
 	// Mkdir creates an empty folder at path. On the filesystem that is a real directory; on

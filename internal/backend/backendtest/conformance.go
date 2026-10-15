@@ -51,6 +51,9 @@ func Run(t *testing.T, newBackend Factory) {
 	for name, fn := range writeTests { // ADR 0038 operations, conformance_write.go
 		tests[name] = fn
 	}
+	for name, fn := range createOnlyTests { // ADR 0117 point 8/8a, conformance_createonly.go
+		tests[name] = fn
+	}
 
 	// Sorted for deterministic ordering of test output.
 	names := make([]string, 0, len(tests))

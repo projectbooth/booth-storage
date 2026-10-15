@@ -17,6 +17,7 @@ import (
 
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/uploadgrant"
 )
 
 // Tokens for the stub verifier: one per (user, role). The role is *not* derived from the
@@ -48,6 +49,7 @@ type testEnv struct {
 	handler http.Handler
 	svc     *registry.Service
 	meta    *registry.MemoryStore
+	grants  *uploadgrant.Service
 	fsRoot  string
 }
 
@@ -61,6 +63,7 @@ func newTestEnv(t *testing.T, mutate ...func(*Deps)) *testEnv {
 	meta := registry.NewMemoryStore()
 	svc := registry.NewService(meta, registry.NewMemoryCredentials(),
 		registry.FilesystemPolicy{Roots: []string{filepath.Join(root, registry.WorkspacePlaceholder)}})
+	grants := uploadgrant.NewService(uploadgrant.NewMemoryStore())
 	deps := Deps{
 		Verifier: stubVerifier{
 			tokAlice: claimsFor("alice", "acme", "owner"),
@@ -69,11 +72,12 @@ func newTestEnv(t *testing.T, mutate ...func(*Deps)) *testEnv {
 			tokDave:  claimsFor("dave", "globex", "owner"),
 		},
 		Registry: svc,
+		Grants:   grants,
 	}
 	for _, m := range mutate {
 		m(&deps)
 	}
-	return &testEnv{handler: NewRouter(deps), svc: svc, meta: meta, fsRoot: root}
+	return &testEnv{handler: NewRouter(deps), svc: svc, meta: meta, grants: grants, fsRoot: root}
 }
 
 type resp struct {

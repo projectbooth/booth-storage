@@ -2,10 +2,12 @@ import type {
   AdminBackend,
   BackendSummary,
   CreateBackendRequest,
+  CreateUploadGrantRequest,
   KindsResponse,
   ListResult,
   TestResult,
   UpdateBackendRequest,
+  UploadGrant,
 } from "../types";
 
 // This component is mounted by booth-design's shell, so its requests resolve against the
@@ -167,3 +169,15 @@ export const testNewBackend = (ctx: ApiContext, body: CreateBackendRequest) =>
 /** Tests a saved backend, optionally previewing an edit without saving it. */
 export const testSavedBackend = (ctx: ApiContext, id: string, preview?: UpdateBackendRequest) =>
   request<TestResult>(ctx, `/admin/backends/${encodeURIComponent(id)}/test`, jsonInit("POST", preview));
+
+// ---- upload grants (ADR 0117 "Reconciled design" item 1/8a) ----------------
+// Mirrors docs/contracts/upload-grants.md. revoke-principal is not called from here: it
+// exists for booth-streamlit's own server-to-server take-ownership flow, not this panel.
+
+export const fetchUploadGrants = (ctx: ApiContext) => request<UploadGrant[]>(ctx, "/admin/upload-grants");
+
+export const createUploadGrant = (ctx: ApiContext, body: CreateUploadGrantRequest) =>
+  request<UploadGrant>(ctx, "/admin/upload-grants", jsonInit("POST", body));
+
+export const deleteUploadGrant = (ctx: ApiContext, id: string) =>
+  request<void>(ctx, `/admin/upload-grants/${encodeURIComponent(id)}`, { method: "DELETE" });

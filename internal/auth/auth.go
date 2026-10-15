@@ -39,6 +39,13 @@ const (
 	RoleOwner  Role = "owner"
 	RoleEditor Role = "editor"
 	RoleViewer Role = "viewer"
+	// RoleGrantsService marks booth-streamlit's revoke-only grants-service identity
+	// (ADR 0117 item 1a) — see grantsServiceWorkspace. It deliberately satisfies none of
+	// CanRead, CanWrite or IsAdmin: that identity is "refused on every other route" by
+	// construction, not by a separate check each of those routes has to get right, even
+	// though the token it presents carries a genuine (viewer-capped) groups claim that
+	// would otherwise grant ordinary read access.
+	RoleGrantsService Role = "grants-service"
 )
 
 // Claims is the subset of a verified token this module cares about.
@@ -47,6 +54,11 @@ type Claims struct {
 	// Groups is the token's workspace-membership claim (ADR 0025), e.g.
 	// "/workspaces/acme/owner". Empty if the token carries none.
 	Groups []string
+	// BoothModule is the "booth_module" claim a core-minted workload token carries
+	// (ADR 0056), naming which module requested the token rather than a person. Used
+	// here only to recognize booth-streamlit's revoke-only grants-service identity
+	// (ADR 0117 item 1a) — see grantsServiceWorkspace. Empty on a human's token.
+	BoothModule string
 }
 
 // TokenVerifier verifies a raw bearer token. *Verifier is the production
@@ -205,11 +217,35 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (*Claims, error)
 		// the token is genuine, it simply grants no workspace role.
 		_ = json.Unmarshal(g, &groups)
 	}
-	return &Claims{Subject: idToken.Subject, Groups: groups}, nil
+	var boothModule string
+	if m, ok := raw["booth_module"]; ok {
+		_ = json.Unmarshal(m, &boothModule)
+	}
+	return &Claims{Subject: idToken.Subject, Groups: groups, BoothModule: boothModule}, nil
 }
 
 // groupRE is ADR 0025's workspace-membership group shape.
 var groupRE = regexp.MustCompile(`^/workspaces/([a-z0-9-]+)/(owner|editor|viewer)$`)
+
+// grantsServiceRE is the literal subject shape ADR 0117 item 1a reserves for
+// booth-streamlit's self-minted, revoke-only grants-service identity.
+var grantsServiceRE = regexp.MustCompile(`^streamlit:([a-z0-9-]+):grants$`)
+
+// grantsServiceWorkspace returns the workspace embedded in claims' subject, and whether
+// claims actually is booth-streamlit's revoke-only grants-service identity: both the
+// booth_module claim and the subject's literal shape must match. Checking both (not just
+// the subject) means a different module could never mint itself this identity by sheer
+// luck of subject naming.
+func grantsServiceWorkspace(claims *Claims) (string, bool) {
+	if claims.BoothModule != "streamlit" {
+		return "", false
+	}
+	m := grantsServiceRE.FindStringSubmatch(claims.Subject)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
 
 func rank(r Role) int {
 	switch r {
@@ -281,6 +317,15 @@ func (i Identity) CanWrite() bool { return i.Role == RoleOwner || i.Role == Role
 // shows.
 func (i Identity) IsAdmin() bool { return i.Role == RoleOwner }
 
+// IsGrantsService reports whether the caller is booth-streamlit's own revoke-only
+// grants-service identity (ADR 0117 item 1a): a core-minted workload token with subject
+// "streamlit:<workspace>:grants" and booth_module "streamlit", used only so
+// booth-streamlit can revoke an app's upload grants on take-ownership without ever
+// holding a person's token. It is accepted on exactly one route
+// (POST /api/admin/upload-grants/revoke-principal); every other route gates on
+// CanRead/CanWrite/IsAdmin, none of which this role satisfies.
+func (i Identity) IsGrantsService() bool { return i.Role == RoleGrantsService }
+
 // FromContext returns the identity Middleware attached, if any.
 func FromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(contextKey{}).(Identity)
@@ -311,6 +356,26 @@ func Middleware(verifier TokenVerifier) func(http.Handler) http.Handler {
 			workspace := r.Header.Get(HeaderBoothWorkspace)
 			if workspace == "" {
 				WriteError(w, http.StatusBadRequest, "missing "+HeaderBoothWorkspace+" header")
+				return
+			}
+
+			// ADR 0117 item 1a: booth-streamlit's revoke-only grants-service identity is
+			// recognized here, before the ordinary groups-derived role below, and is
+			// never given one of RoleOwner/Editor/Viewer — even though the token it
+			// presents legitimately carries a viewer-capped groups claim that would
+			// otherwise grant ordinary read access. Workspace still comes from the
+			// token (the subject it's embedded in), never trusted from the header alone:
+			// a header naming a different workspace than the token's own is rejected,
+			// the same "never widen past what the token itself says" principle as the
+			// ordinary role check just below.
+			if gw, ok := grantsServiceWorkspace(claims); ok {
+				if workspace != gw {
+					WriteError(w, http.StatusForbidden, "the workspace header does not match this service identity's own workspace")
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), Identity{
+					Subject: claims.Subject, Workspace: workspace, Role: RoleGrantsService,
+				})))
 				return
 			}
 
