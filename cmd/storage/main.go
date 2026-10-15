@@ -20,6 +20,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/config"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/uploadgrant"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -39,7 +40,7 @@ func run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	meta, creds, closeStores, err := openStores(ctx, cfg)
+	meta, creds, grants, closeStores, err := openStores(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -61,6 +62,7 @@ func run() error {
 		Handler: api.NewRouter(api.Deps{
 			Verifier:                   verifier,
 			Registry:                   registry.NewService(meta, creds, registry.FilesystemPolicy{Roots: cfg.FilesystemRoots}),
+			Grants:                     uploadgrant.NewService(grants),
 			MaxUploadBytes:             cfg.MaxUploadBytes,
 			CredentialBrokerCredential: cfg.CredentialBrokerCredential,
 		}),
@@ -83,30 +85,33 @@ func run() error {
 	return nil
 }
 
-// openStores builds the metadata and credential stores: PostgreSQL + Kubernetes Secrets
-// in a real deployment (ADR 0014, ADR 0020), or in-process memory in explicit dev mode.
-func openStores(ctx context.Context, cfg config.Config) (registry.MetadataStore, registry.CredentialStore, func(), error) {
+// openStores builds the metadata, credential and upload-grant stores: PostgreSQL +
+// Kubernetes Secrets in a real deployment (ADR 0014, ADR 0020), or in-process memory in
+// explicit dev mode. The upload-grant store shares the metadata store's one connection
+// pool and migration runner (registry.PostgresStore.Pool) rather than opening a second
+// pool for one more table.
+func openStores(ctx context.Context, cfg config.Config) (registry.MetadataStore, registry.CredentialStore, uploadgrant.Store, func(), error) {
 	if cfg.DevMemory {
 		log.Print("WARNING: BOOTH_STORAGE_DEV_MEMORY=true — backend metadata AND credentials are held only in this process's memory and are lost on restart. Local development only.")
-		return registry.NewMemoryStore(), registry.NewMemoryCredentials(), func() {}, nil
+		return registry.NewMemoryStore(), registry.NewMemoryCredentials(), uploadgrant.NewMemoryStore(), func() {}, nil
 	}
 
 	pg, err := registry.NewPostgresStore(ctx, cfg.PostgresDSN)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("opening metadata store: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("opening metadata store: %w", err)
 	}
 
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		pg.Close()
-		return nil, nil, nil, fmt.Errorf("loading in-cluster Kubernetes config (credentials are stored as Secrets, ADR 0020): %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("loading in-cluster Kubernetes config (credentials are stored as Secrets, ADR 0020): %w", err)
 	}
 	client, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		pg.Close()
-		return nil, nil, nil, fmt.Errorf("creating Kubernetes client: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("creating Kubernetes client: %w", err)
 	}
 	log.Printf("storing backend credentials as Secrets in namespace %q", cfg.Namespace)
 
-	return pg, registry.NewKubernetesCredentials(client, cfg.Namespace), pg.Close, nil
+	return pg, registry.NewKubernetesCredentials(client, cfg.Namespace), uploadgrant.NewPostgresStore(pg.Pool()), pg.Close, nil
 }

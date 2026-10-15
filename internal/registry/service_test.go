@@ -9,11 +9,15 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -285,6 +289,45 @@ func TestService_UpdateReplacesAndClearsCredentials(t *testing.T) {
 	}
 }
 
+// ADR 0117 point 8a: a changed config may point at a different server, so an earlier
+// create-only capability probe must not be trusted to still describe it.
+func TestService_UpdateResetsCreateOnlyVerifiedWhenConfigChanges(t *testing.T) {
+	e := newEnv(t)
+	created, err := e.svc.Create(testCtx, "acme", "alice", CreateInput{ID: "lake", Kind: backend.KindS3, Config: s3Config, Credentials: s3Creds()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.CreateOnlyVerified = true
+	if err := e.meta.Update(testCtx, created); err != nil { // seed directly: only TestSaved sets this in production
+		t.Fatal(err)
+	}
+
+	// A display-name-only update must not touch it.
+	rec, err := e.svc.Update(testCtx, "acme", "lake", UpdateInput{DisplayName: ptr("Renamed")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.CreateOnlyVerified {
+		t.Error("an unrelated field update cleared CreateOnlyVerified")
+	}
+
+	// A config change (a different endpoint) must reset it: nothing proved the new
+	// server honours the precondition.
+	newConfig := json.RawMessage(`{"endpoint":"http://other-minio:9000","bucket":"data","pathStyle":true}`)
+	rec, err = e.svc.Update(testCtx, "acme", "lake", UpdateInput{Config: newConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.CreateOnlyVerified {
+		t.Error("CreateOnlyVerified survived a config change")
+	}
+	if SupportsCreateOnly(rec) {
+		t.Error("SupportsCreateOnly should be false for an S3 backend with a reset, unproven config")
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func TestService_UpdateRejectsInvalidChanges(t *testing.T) {
 	e := newEnv(t)
 	_, _ = e.svc.Create(testCtx, "acme", "alice", CreateInput{ID: "lake", Kind: backend.KindS3, Config: s3Config, Credentials: s3Creds()})
@@ -517,6 +560,61 @@ func TestService_TestUpdateUsesStoredCredentials(t *testing.T) {
 	rec, _ := e.svc.Get(testCtx, "acme", "d")
 	if !strings.Contains(string(rec.Config), "/d") && !strings.Contains(string(rec.Config), `\\d`) {
 		t.Errorf("TestUpdate persisted the tested config: %s", rec.Config)
+	}
+}
+
+// ADR 0117 point 8a end to end, against a real MinIO (CI starts one; locally see
+// hack/docker-compose.emulators.yml): TestSaved proves the capability probe actually
+// runs and its result is persisted, flipping SupportsCreateOnly from false to true.
+func TestService_TestSaved_S3CreateOnlyProbe(t *testing.T) {
+	endpoint := os.Getenv("BOOTH_TEST_S3_ENDPOINT")
+	if endpoint == "" {
+		if os.Getenv("BOOTH_TEST_REQUIRE_EMULATORS") == "1" {
+			t.Fatal("BOOTH_TEST_REQUIRE_EMULATORS=1 but BOOTH_TEST_S3_ENDPOINT is not set")
+		}
+		t.Skip("BOOTH_TEST_S3_ENDPOINT not set; skipping (see hack/docker-compose.emulators.yml)")
+	}
+	access, secret := os.Getenv("BOOTH_TEST_S3_ACCESS_KEY"), os.Getenv("BOOTH_TEST_S3_SECRET_KEY")
+
+	admin, err := minio.New(strings.TrimPrefix(endpoint, "http://"), &minio.Options{
+		Creds: credentials.NewStaticV4(access, secret, ""), BucketLookup: minio.BucketLookupPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := fmt.Sprintf("booth-registry-probe-%d", time.Now().UnixNano())
+	if err := admin.MakeBucket(testCtx, bucket, minio.MakeBucketOptions{}); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	t.Cleanup(func() {
+		for o := range admin.ListObjects(testCtx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+			_ = admin.RemoveObject(testCtx, bucket, o.Key, minio.RemoveObjectOptions{})
+		}
+		_ = admin.RemoveBucket(testCtx, bucket)
+	})
+
+	e := newEnv(t)
+	cfg, _ := json.Marshal(map[string]any{"endpoint": endpoint, "bucket": bucket, "pathStyle": true})
+	created, err := e.svc.Create(testCtx, "acme", "alice", CreateInput{
+		ID: "lake", Kind: backend.KindS3, Config: cfg,
+		Credentials: map[string]string{"accessKeyId": access, "secretAccessKey": secret},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if SupportsCreateOnly(created) {
+		t.Error("a freshly registered S3 backend must not support create-only before it's been proven")
+	}
+
+	if err := e.svc.TestSaved(testCtx, "acme", "lake"); err != nil {
+		t.Fatalf("TestSaved: %v", err)
+	}
+	rec, err := e.svc.Get(testCtx, "acme", "lake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SupportsCreateOnly(rec) {
+		t.Error("TestSaved against a real MinIO that honours If-None-Match should have set CreateOnlyVerified")
 	}
 }
 

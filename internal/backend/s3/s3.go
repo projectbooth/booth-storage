@@ -5,6 +5,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -188,10 +189,32 @@ func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend
 	if err != nil {
 		return backend.ObjectInfo{}, err
 	}
-	// Size -1 streams with a multipart upload, so an arbitrarily large body never
-	// has to be buffered in memory or on disk. An upload that fails part-way is
-	// aborted by the client and never becomes visible.
-	info, err := b.client.PutObject(ctx, b.bucket, b.prefix+clean, r, -1, minio.PutObjectOptions{ContentType: opts.ContentType})
+
+	putOpts := minio.PutObjectOptions{ContentType: opts.ContentType}
+	if !opts.CreateOnly {
+		// Size -1 streams with a multipart upload, so an arbitrarily large body never
+		// has to be buffered in memory or on disk. An upload that fails part-way is
+		// aborted by the client and never becomes visible.
+		info, err := b.client.PutObject(ctx, b.bucket, b.prefix+clean, r, -1, putOpts)
+		if err != nil {
+			return backend.ObjectInfo{}, describe(err)
+		}
+		return backend.ObjectInfo{Path: clean, Size: info.Size, ModTime: info.LastModified.UTC(), ContentType: opts.ContentType}, nil
+	}
+
+	// A conditional PUT must be a single request carrying both the body and the
+	// If-None-Match header: CreateMultipartUpload/UploadPart/CompleteMultipartUpload is
+	// three requests, and not every S3-compatible server honours a precondition across
+	// all of them the way it does a single PutObject. So this path buffers the body
+	// (bounded upstream by the admission check's grant.MaxBytes, never unbounded) to learn
+	// its length and send one conditional PutObject — the one request every registered S3
+	// backend's capability probe (registry.Service) actually proves.
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return backend.ObjectInfo{}, fmt.Errorf("buffering object for create-only write: %w", err)
+	}
+	putOpts.SetMatchETagExcept("*")
+	info, err := b.client.PutObject(ctx, b.bucket, b.prefix+clean, bytes.NewReader(body), int64(len(body)), putOpts)
 	if err != nil {
 		return backend.ObjectInfo{}, describe(err)
 	}
@@ -294,6 +317,8 @@ func describe(err error) error {
 			return fmt.Errorf("bucket does not exist: %s", resp.BucketName)
 		case "AccessDenied", "InvalidAccessKeyId", "SignatureDoesNotMatch":
 			return fmt.Errorf("access denied by the storage service (%s) — check the credentials and bucket permissions", resp.Code)
+		case minio.PreconditionFailed:
+			return backend.ErrPreconditionFailed
 		}
 	}
 	return err

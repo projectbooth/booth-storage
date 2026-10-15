@@ -60,7 +60,21 @@ func (m *MemoryStore) Update(_ context.Context, r Record) error {
 		return ErrNotFound
 	}
 	// Only the mutable fields change, mirroring what the SQL implementation does.
-	cur.DisplayName, cur.Config, cur.HasCredentials, cur.UpdatedAt = r.DisplayName, r.Config, r.HasCredentials, r.UpdatedAt
+	cur.DisplayName, cur.Config, cur.HasCredentials, cur.CreateOnlyVerified, cur.UpdatedAt =
+		r.DisplayName, r.Config, r.HasCredentials, r.CreateOnlyVerified, r.UpdatedAt
+	m.recs[k] = clone(cur)
+	return nil
+}
+
+func (m *MemoryStore) SetCreateOnlyVerified(_ context.Context, workspace, id string, verified bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := key(workspace, id)
+	cur, ok := m.recs[k]
+	if !ok {
+		return ErrNotFound
+	}
+	cur.CreateOnlyVerified = verified
 	m.recs[k] = clone(cur)
 	return nil
 }

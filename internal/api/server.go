@@ -35,6 +35,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/backend"
 	"github.com/projectbooth/booth-storage/internal/credentialbroker"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/uploadgrant"
 )
 
 // maxJSONBody bounds admin request bodies; a GCS service-account key is the largest
@@ -45,6 +46,11 @@ const maxJSONBody = 256 << 10
 type Deps struct {
 	Verifier auth.TokenVerifier
 	Registry *registry.Service
+	// Grants holds upload grants (ADR 0117 "Reconciled design" item 1/8a): which app
+	// principal may make a create-only write into which backend prefix. Drives both the
+	// owner-only /api/admin/upload-grants management routes and the admission check in
+	// handleWriteObject.
+	Grants *uploadgrant.Service
 	// MaxUploadBytes caps one object write; 0 means unlimited.
 	MaxUploadBytes int64
 	// CredentialBrokerCredential is this module's copy of the shared secret core presents
@@ -89,9 +95,17 @@ func NewRouter(deps Deps) http.Handler {
 			r.Get("/api/backends/{id}/objects", s.handleListObjects)
 			r.Get("/api/backends/{id}/objects/*", s.handleReadObject)
 		})
+		// PUT .../objects/* does its own authorization inline (ADR 0117 point 8a),
+		// rather than sitting behind auth.Require(CanWrite): editors and owners may
+		// always write, unchanged; a viewer-capped app workload token may additionally
+		// make exactly one create-only write into a prefix where a live upload grant
+		// admits it. Every other write route below is untouched and still CanWrite-gated,
+		// so a plain PUT, DELETE and folder delete stay 403 for such a token by
+		// construction — see handleWriteObject.
+		r.Put("/api/backends/{id}/objects/*", s.handleWriteObject)
+
 		r.Group(func(r chi.Router) {
 			r.Use(auth.Require(auth.Identity.CanWrite, "only workspace editors and owners can write objects"))
-			r.Put("/api/backends/{id}/objects/*", s.handleWriteObject)
 			r.Delete("/api/backends/{id}/objects/*", s.handleDeleteObject)
 			r.Post("/api/backends/{id}/folders", s.handleCreateFolder)
 			r.Delete("/api/backends/{id}/folders/*", s.handleDeleteFolder)
@@ -108,6 +122,13 @@ func NewRouter(deps Deps) http.Handler {
 			r.Delete("/backends/{id}", s.handleAdminDelete)
 			r.Post("/backends/{id}/test", s.handleAdminTestSaved)
 			r.Post("/test-connection", s.handleAdminTestNew)
+
+			// Upload grants (ADR 0117 "Reconciled design" item 1/8a): owner-only, no
+			// update route — narrowing a grant is delete-and-recreate.
+			r.Get("/upload-grants", s.handleAdminListUploadGrants)
+			r.Post("/upload-grants", s.handleAdminCreateUploadGrant)
+			r.Delete("/upload-grants/{id}", s.handleAdminDeleteUploadGrant)
+			r.Post("/upload-grants/revoke-principal", s.handleAdminRevokeUploadGrantsByPrincipal)
 		})
 	})
 
@@ -135,6 +156,10 @@ type AdminBackend struct {
 	Config         json.RawMessage `json:"config"`
 	CredentialsSet bool            `json:"credentialsSet"`
 	CreatedBy      string          `json:"createdBy,omitempty"`
+	// CreateOnlySupported reports whether an app's create-only upload (ADR 0117 point 8)
+	// can be admitted against this backend right now. Always true except for an S3
+	// backend that hasn't yet passed the capability probe ("test connection" runs it).
+	CreateOnlySupported bool `json:"createOnlySupported"`
 }
 
 func summarize(r registry.Record) BackendSummary {
@@ -145,7 +170,10 @@ func summarize(r registry.Record) BackendSummary {
 }
 
 func adminView(r registry.Record) AdminBackend {
-	return AdminBackend{BackendSummary: summarize(r), Config: r.Config, CredentialsSet: r.HasCredentials, CreatedBy: r.CreatedBy}
+	return AdminBackend{
+		BackendSummary: summarize(r), Config: r.Config, CredentialsSet: r.HasCredentials, CreatedBy: r.CreatedBy,
+		CreateOnlySupported: registry.SupportsCreateOnly(r),
+	}
 }
 
 // ---- health ----------------------------------------------------------------
@@ -278,26 +306,101 @@ func (s *server) handleReadObject(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleWriteObject is PUT .../objects/*. It is deliberately not behind
+// auth.Require(CanWrite): editors and owners may always write (unchanged); a
+// viewer-capped app workload token may additionally make exactly one create-only write
+// ("If-None-Match: *") into a prefix where internal/uploadgrant holds a live grant for
+// its principal (ADR 0117 point 8a). Every other shape — a plain PUT from such a token,
+// or any request from a role that is neither editor/owner nor an admitted grant — falls
+// through to the same 403 CanWrite used to guard everywhere, so DELETE and folder-delete
+// (genuinely still CanWrite-gated, unchanged) are not the only things keeping an app
+// token from doing more than its one admitted call.
 func (s *server) handleWriteObject(w http.ResponseWriter, r *http.Request) {
+	id := identity(r)
+	backendID := chi.URLParam(r, "id")
+	clean, err := backend.CleanPath(objectPath(r, backendID))
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	createOnly := r.Header.Get("If-None-Match") == "*"
+
+	var grant *uploadgrant.Grant
+	if !id.CanWrite() {
+		if !createOnly {
+			auth.WriteError(w, http.StatusForbidden, "only workspace editors and owners can write objects")
+			return
+		}
+		// Not an editor/owner, but asking for a create-only write: the only shape a
+		// viewer-capped app workload token is ever admitted through. auth.Middleware
+		// already guarantees id.Role == RoleViewer here (CanWrite is false, and a token
+		// granting no role was rejected before this handler ran).
+		g, ok, merr := s.Grants.MatchForUpload(r.Context(), id.Workspace, id.Subject, backendID, clean)
+		if merr != nil {
+			log.Printf("upload grant lookup failed workspace=%s backend=%s path=%q by=%s: %v", id.Workspace, backendID, clean, id.Subject, merr)
+			auth.WriteError(w, http.StatusBadGateway, "could not verify the upload grant")
+			return
+		}
+		if !ok {
+			auth.WriteError(w, http.StatusForbidden, "no live upload grant admits this write")
+			return
+		}
+		if !uploadgrant.HasExtension(clean, g.Extensions) {
+			auth.WriteError(w, http.StatusUnsupportedMediaType, "this file extension is not allowed by the upload grant")
+			return
+		}
+		grant = &g
+	}
+
+	if createOnly {
+		// 501 until an S3 backend has proven it honours the precondition (ADR 0117
+		// point 8a) — this applies to every caller, not only an admitted app: nothing
+		// may ever fall back to check-then-write.
+		rec, rerr := s.Registry.Get(r.Context(), id.Workspace, backendID)
+		if rerr != nil {
+			writeRegistryError(w, rerr)
+			return
+		}
+		if !registry.SupportsCreateOnly(rec) {
+			auth.WriteError(w, http.StatusNotImplemented, "this backend has not passed the create-only capability probe")
+			return
+		}
+	}
+
 	b, ok := s.openBackend(w, r)
 	if !ok {
 		return
 	}
-	path := objectPath(r, chi.URLParam(r, "id"))
 
-	body := io.Reader(r.Body)
-	if s.MaxUploadBytes > 0 {
-		body = http.MaxBytesReader(w, r.Body, s.MaxUploadBytes)
+	maxBytes := s.MaxUploadBytes
+	if grant != nil && (maxBytes <= 0 || grant.MaxBytes < maxBytes) {
+		maxBytes = grant.MaxBytes
 	}
-	info, err := b.Write(r.Context(), path, body, backend.WriteOptions{ContentType: cleanContentType(r.Header.Get("Content-Type"))})
+	body := io.Reader(r.Body)
+	if maxBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+
+	info, err := b.Write(r.Context(), clean, body, backend.WriteOptions{
+		ContentType: cleanContentType(r.Header.Get("Content-Type")), CreateOnly: createOnly,
+	})
 	if err != nil {
 		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			auth.WriteError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("object exceeds the %d byte upload limit", s.MaxUploadBytes))
-			return
+		switch {
+		case errors.As(err, &tooBig):
+			auth.WriteError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("object exceeds the %d byte upload limit", maxBytes))
+		case errors.Is(err, backend.ErrPreconditionFailed):
+			auth.WriteError(w, http.StatusPreconditionFailed, "an object already exists at this path")
+		default:
+			writeBackendError(w, err)
 		}
-		writeBackendError(w, err)
+		if grant != nil {
+			log.Printf("audit: app upload rejected workspace=%s backend=%s path=%q principal=%s grant=%s: %v", id.Workspace, backendID, clean, id.Subject, grant.ID, err)
+		}
 		return
+	}
+	if grant != nil {
+		log.Printf("audit: app upload workspace=%s backend=%s path=%q principal=%s grant=%s size=%d", id.Workspace, backendID, clean, id.Subject, grant.ID, info.Size)
 	}
 	writeJSON(w, http.StatusOK, info)
 }
@@ -552,6 +655,126 @@ func writeTestResult(w http.ResponseWriter, err error) {
 	}
 }
 
+// ---- upload grants (ADR 0117 "Reconciled design" item 1/8a) ----------------
+
+// uploadGrantView is the JSON shape of one grant, returned by every grant route.
+type uploadGrantView struct {
+	ID         string    `json:"id"`
+	Workspace  string    `json:"workspace"`
+	Principal  string    `json:"principal"`
+	BackendID  string    `json:"backendId"`
+	Prefix     string    `json:"prefix"`
+	Extensions []string  `json:"extensions"`
+	MaxBytes   int64     `json:"maxBytes"`
+	GrantedBy  string    `json:"grantedBy"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+func grantView(g uploadgrant.Grant) uploadGrantView {
+	return uploadGrantView{
+		ID: g.ID, Workspace: g.Workspace, Principal: g.Principal, BackendID: g.BackendID,
+		Prefix: g.Prefix, Extensions: g.Extensions, MaxBytes: g.MaxBytes, GrantedBy: g.GrantedBy, CreatedAt: g.CreatedAt,
+	}
+}
+
+func (s *server) handleAdminListUploadGrants(w http.ResponseWriter, r *http.Request) {
+	grants, err := s.Grants.List(r.Context(), identity(r).Workspace, r.URL.Query().Get("principal"))
+	if err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	out := make([]uploadGrantView, len(grants))
+	for i, g := range grants {
+		out[i] = grantView(g)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+type createUploadGrantRequest struct {
+	Principal  string   `json:"principal"`
+	BackendID  string   `json:"backendId"`
+	Prefix     string   `json:"prefix"`
+	Extensions []string `json:"extensions"`
+	MaxBytes   int64    `json:"maxBytes"`
+}
+
+// handleAdminCreateUploadGrant creates a grant, or — for the same (principal, backend,
+// prefix) — replaces one that already exists (uploadgrant.Service.Create). This is the
+// single call booth-streamlit's "Write targets" panel makes to save an upload target.
+func (s *server) handleAdminCreateUploadGrant(w http.ResponseWriter, r *http.Request) {
+	var req createUploadGrantRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	id := identity(r)
+	if _, err := s.Registry.Get(r.Context(), id.Workspace, req.BackendID); err != nil {
+		writeRegistryError(w, err)
+		return
+	}
+	g, err := s.Grants.Create(r.Context(), id.Workspace, id.Subject, uploadgrant.CreateInput{
+		Principal: req.Principal, BackendID: req.BackendID, Prefix: req.Prefix, Extensions: req.Extensions, MaxBytes: req.MaxBytes,
+	})
+	if err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	log.Printf("audit: upload grant created workspace=%s id=%s principal=%s backend=%s prefix=%q by=%s", g.Workspace, g.ID, g.Principal, g.BackendID, g.Prefix, id.Subject)
+	writeJSON(w, http.StatusCreated, grantView(g))
+}
+
+func (s *server) handleAdminDeleteUploadGrant(w http.ResponseWriter, r *http.Request) {
+	id := identity(r)
+	grantID := chi.URLParam(r, "id")
+	if err := s.Grants.Delete(r.Context(), id.Workspace, grantID); err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	log.Printf("audit: upload grant deleted workspace=%s id=%s by=%s", id.Workspace, grantID, id.Subject)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type revokePrincipalRequest struct {
+	Principal string `json:"principal"`
+}
+
+// handleAdminRevokeUploadGrantsByPrincipal mirrors booth-api's
+// POST /api/write-grants/revoke-principal exactly: revokes every live grant the
+// principal holds in the workspace, across every backend, in one call. booth-streamlit
+// calls this on take-ownership and must fail closed on anything but success — the
+// {"revoked", "items"} shape and idempotency (0 the second time) are what let it do that.
+func (s *server) handleAdminRevokeUploadGrantsByPrincipal(w http.ResponseWriter, r *http.Request) {
+	var req revokePrincipalRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	id := identity(r)
+	revoked, err := s.Grants.RevokePrincipal(r.Context(), id.Workspace, req.Principal)
+	if err != nil {
+		writeGrantError(w, err)
+		return
+	}
+	items := make([]uploadGrantView, len(revoked))
+	for i, g := range revoked {
+		items[i] = grantView(g)
+	}
+	log.Printf("audit: upload grants revoked workspace=%s principal=%s count=%d by=%s", id.Workspace, req.Principal, len(revoked), id.Subject)
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": len(revoked), "items": items})
+}
+
+// writeGrantError maps uploadgrant errors onto HTTP statuses.
+func writeGrantError(w http.ResponseWriter, err error) {
+	var ve *uploadgrant.ValidationError
+	switch {
+	case errors.As(err, &ve):
+		writeJSON(w, http.StatusUnprocessableEntity, errorBody{Error: ve.Message, Field: ve.Field})
+	case errors.Is(err, uploadgrant.ErrNotFound):
+		auth.WriteError(w, http.StatusNotFound, "upload grant not found")
+	default:
+		log.Printf("upload grant error: %v", err)
+		auth.WriteError(w, http.StatusBadGateway, err.Error())
+	}
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 func identity(r *http.Request) auth.Identity {
@@ -614,6 +837,8 @@ func writeBackendError(w http.ResponseWriter, err error) {
 		auth.WriteError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, backend.ErrConflict):
 		auth.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, backend.ErrPreconditionFailed):
+		auth.WriteError(w, http.StatusPreconditionFailed, err.Error())
 	case errors.Is(err, context.Canceled):
 		// The client went away; nothing to report to anyone.
 		w.WriteHeader(499)

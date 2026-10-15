@@ -58,6 +58,12 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 // Close releases the connection pool.
 func (s *PostgresStore) Close() { s.pool.Close() }
 
+// Pool returns the underlying connection pool, so a module-level package sharing this
+// module's one PostgreSQL database and migration runner (internal/uploadgrant) can run
+// its own queries against it, rather than opening a second pool and a second migration
+// race for one database.
+func (s *PostgresStore) Pool() *pgxpool.Pool { return s.pool }
+
 // migrate applies embedded migrations in filename order, each exactly once, all inside
 // one transaction holding an advisory lock — safe to run from every replica at boot.
 func (s *PostgresStore) migrate(ctx context.Context) error {
@@ -110,12 +116,12 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
-const selectCols = `workspace, id, display_name, kind, config, has_credentials, created_by, created_at, updated_at`
+const selectCols = `workspace, id, display_name, kind, config, has_credentials, create_only_verified, created_by, created_at, updated_at`
 
 func scan(row pgx.Row) (Record, error) {
 	var r Record
 	var kind string
-	if err := row.Scan(&r.Workspace, &r.ID, &r.DisplayName, &kind, &r.Config, &r.HasCredentials, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt); err != nil {
+	if err := row.Scan(&r.Workspace, &r.ID, &r.DisplayName, &kind, &r.Config, &r.HasCredentials, &r.CreateOnlyVerified, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return Record{}, err
 	}
 	r.Kind = backend.Kind(kind)
@@ -125,8 +131,8 @@ func scan(row pgx.Row) (Record, error) {
 
 func (s *PostgresStore) Create(ctx context.Context, r Record) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO storage_backends (`+selectCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		r.Workspace, r.ID, r.DisplayName, string(r.Kind), []byte(r.Config), r.HasCredentials, r.CreatedBy, r.CreatedAt, r.UpdatedAt)
+		`INSERT INTO storage_backends (`+selectCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		r.Workspace, r.ID, r.DisplayName, string(r.Kind), []byte(r.Config), r.HasCredentials, r.CreateOnlyVerified, r.CreatedBy, r.CreatedAt, r.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 		return ErrExists
@@ -161,8 +167,19 @@ func (s *PostgresStore) List(ctx context.Context, workspace string) ([]Record, e
 
 func (s *PostgresStore) Update(ctx context.Context, r Record) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE storage_backends SET display_name=$3, config=$4, has_credentials=$5, updated_at=$6 WHERE workspace=$1 AND id=$2`,
-		r.Workspace, r.ID, r.DisplayName, []byte(r.Config), r.HasCredentials, r.UpdatedAt)
+		`UPDATE storage_backends SET display_name=$3, config=$4, has_credentials=$5, create_only_verified=$6, updated_at=$7 WHERE workspace=$1 AND id=$2`,
+		r.Workspace, r.ID, r.DisplayName, []byte(r.Config), r.HasCredentials, r.CreateOnlyVerified, r.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetCreateOnlyVerified(ctx context.Context, workspace, id string, verified bool) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE storage_backends SET create_only_verified=$3 WHERE workspace=$1 AND id=$2`, workspace, id, verified)
 	if err != nil {
 		return err
 	}

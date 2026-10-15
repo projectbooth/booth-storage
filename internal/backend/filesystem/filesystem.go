@@ -164,7 +164,21 @@ func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend
 		return backend.ObjectInfo{}, fmt.Errorf("closing object: %w", err)
 	}
 
-	if err := root.Rename(filepath.FromSlash(tmpName), filepath.FromSlash(clean)); err != nil {
+	if opts.CreateOnly {
+		// Link, not Rename: it atomically fails with EEXIST if clean already exists,
+		// rather than silently replacing it. Content is fully written and synced above,
+		// so no partial object is ever linked in.
+		if err := root.Link(filepath.FromSlash(tmpName), filepath.FromSlash(clean)); err != nil {
+			_ = root.Remove(filepath.FromSlash(tmpName))
+			if errors.Is(err, fs.ErrExist) {
+				return backend.ObjectInfo{}, backend.ErrPreconditionFailed
+			}
+			return backend.ObjectInfo{}, fmt.Errorf("%w: cannot store object at %q (a directory may already exist there): %v", backend.ErrInvalidPath, clean, err)
+		}
+		// Best-effort: the object is already live under its real name: a leftover temp
+		// file is invisible to List (tempPrefix) and harmless.
+		_ = root.Remove(filepath.FromSlash(tmpName))
+	} else if err := root.Rename(filepath.FromSlash(tmpName), filepath.FromSlash(clean)); err != nil {
 		_ = root.Remove(filepath.FromSlash(tmpName))
 		return backend.ObjectInfo{}, fmt.Errorf("%w: cannot store object at %q (a directory may already exist there): %v", backend.ErrInvalidPath, clean, err)
 	}
