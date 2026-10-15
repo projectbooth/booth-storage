@@ -13,17 +13,22 @@ import (
 // grant rather than the ordinary editor/owner CanWrite gate.
 
 const (
-	tokAppOne = "tok-app-one" // streamlit:acme:app1, viewer in acme
-	tokAppTwo = "tok-app-two" // streamlit:acme:app2, viewer in acme
+	tokAppOne       = "tok-app-one"       // streamlit:acme:app1, viewer in acme
+	tokAppTwo       = "tok-app-two"       // streamlit:acme:app2, viewer in acme
+	tokGrantsAcme   = "tok-grants-acme"   // streamlit:acme:grants, the revoke-only service identity, booth_module=streamlit
+	tokGrantsGlobex = "tok-grants-globex" // streamlit:globex:grants
 )
 
 var (
-	appOne = caller{tokAppOne, "acme", "viewer"}
-	appTwo = caller{tokAppTwo, "acme", "viewer"}
+	appOne       = caller{tokAppOne, "acme", "viewer"}
+	appTwo       = caller{tokAppTwo, "acme", "viewer"}
+	grantsAcme   = caller{tokGrantsAcme, "acme", "viewer"}
+	grantsGlobex = caller{tokGrantsGlobex, "globex", "viewer"}
 )
 
-// withAppTokens extends the stub verifier with two app workload tokens, alongside the
-// usual human ones every other test in this package relies on.
+// withAppTokens extends the stub verifier with two app workload tokens and
+// booth-streamlit's revoke-only grants-service identity (ADR 0117 item 1a), alongside
+// the usual human ones every other test in this package relies on.
 func withAppTokens(d *Deps) {
 	d.Verifier = stubVerifier{
 		tokAlice:  claimsFor("alice", "acme", "owner"),
@@ -32,6 +37,12 @@ func withAppTokens(d *Deps) {
 		tokDave:   claimsFor("dave", "globex", "owner"),
 		tokAppOne: claimsFor("streamlit:acme:app1", "acme", "viewer"),
 		tokAppTwo: claimsFor("streamlit:acme:app2", "acme", "viewer"),
+		tokGrantsAcme: {
+			Subject: "streamlit:acme:grants", Groups: []string{"/workspaces/acme/viewer"}, BoothModule: "streamlit",
+		},
+		tokGrantsGlobex: {
+			Subject: "streamlit:globex:grants", Groups: []string{"/workspaces/globex/viewer"}, BoothModule: "streamlit",
+		},
 	}
 }
 
@@ -327,6 +338,114 @@ func TestAdmission_EditorCreateOnlyWriteUnrelatedToGrants(t *testing.T) {
 	got := e.do(t, alice, "GET", "/api/backends/lake/objects/a.txt", nil)
 	if got.Body.String() != "third" {
 		t.Errorf("body = %q, want third", got.Body.String())
+	}
+}
+
+// ---- the revoke-only grants-service identity (ADR 0117 item 1a) -------------
+
+func TestGrantsService_RevokesOwnWorkspaceAppPrincipal(t *testing.T) {
+	e := newGrantTestEnv(t)
+	e.registerFS(t, "acme", "lake")
+	e.grantUpload(t, "lake", "incoming", []string{"csv"}, 1024)
+
+	r := e.do(t, grantsAcme, "POST", "/api/admin/upload-grants/revoke-principal", map[string]any{"principal": "streamlit:acme:app1"})
+	expect(t, r, 200)
+	var out struct {
+		Revoked int
+		Items   []uploadGrantView
+	}
+	r.json(t, &out)
+	if out.Revoked != 1 {
+		t.Fatalf("revoke-principal = %+v", out)
+	}
+
+	var list []uploadGrantView
+	e.do(t, alice, "GET", "/api/admin/upload-grants", nil).json(t, &list)
+	if len(list) != 0 {
+		t.Errorf("grant still present after service revoke: %+v", list)
+	}
+
+	// Idempotent.
+	r = e.do(t, grantsAcme, "POST", "/api/admin/upload-grants/revoke-principal", map[string]any{"principal": "streamlit:acme:app1"})
+	expect(t, r, 200)
+	out = struct {
+		Revoked int
+		Items   []uploadGrantView
+	}{}
+	r.json(t, &out)
+	if out.Revoked != 0 {
+		t.Errorf("second call = %+v, want 0", out)
+	}
+}
+
+func TestGrantsService_RefusedOutsideItsOwnWorkspaceOrShape(t *testing.T) {
+	e := newGrantTestEnv(t)
+	e.registerFS(t, "acme", "lake")
+	e.grantUpload(t, "lake", "incoming", []string{"csv"}, 1024)
+
+	cases := []struct {
+		name      string
+		principal string
+	}{
+		{"another workspace's app", "streamlit:globex:app1"},
+		{"not an app principal at all", "alice"},
+		{"its own reserved subject", "streamlit:acme:grants"},
+		{"booth-api's sidecar subject", "apiwrite:some-api"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := e.do(t, grantsAcme, "POST", "/api/admin/upload-grants/revoke-principal", map[string]any{"principal": tc.principal})
+			expect(t, r, 403)
+		})
+	}
+
+	// The grant must still be there: nothing above should have revoked it.
+	var list []uploadGrantView
+	e.do(t, alice, "GET", "/api/admin/upload-grants", nil).json(t, &list)
+	if len(list) != 1 {
+		t.Errorf("grant was revoked by a refused call: %+v", list)
+	}
+}
+
+// The grants-service identity reaches exactly one route. Every other route in this
+// module — including the other upload-grants admin routes, backends, and objects —
+// gates on CanRead/CanWrite/IsAdmin, none of which auth.RoleGrantsService satisfies.
+func TestGrantsService_RefusedOnEveryOtherRoute(t *testing.T) {
+	e := newGrantTestEnv(t)
+	e.registerFS(t, "acme", "lake")
+	e.grantUpload(t, "lake", "incoming", []string{"csv"}, 1024)
+	expect(t, e.do(t, bob, "PUT", "/api/backends/lake/objects/f.txt", "x"), 200)
+
+	routes := []struct{ method, path string }{
+		{"GET", "/api/admin/upload-grants"},
+		{"POST", "/api/admin/upload-grants"},
+		{"DELETE", "/api/admin/upload-grants/anything"},
+		{"GET", "/api/backends"},
+		{"GET", "/api/backends/lake"},
+		{"GET", "/api/backends/lake/objects"},
+		{"GET", "/api/backends/lake/objects/f.txt"},
+		{"PUT", "/api/backends/lake/objects/f.txt"},
+		{"DELETE", "/api/backends/lake/objects/f.txt"},
+		{"POST", "/api/backends/lake/folders"},
+		{"DELETE", "/api/backends/lake/folders/incoming"},
+		{"POST", "/api/backends/lake/move"},
+		{"GET", "/api/admin/backends"},
+		{"POST", "/api/admin/backends"},
+		{"GET", "/api/kinds"},
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			if r := e.do(t, grantsAcme, rt.method, rt.path, nil); r.Code != 403 {
+				t.Errorf("status = %d, want 403 (body: %s)", r.Code, r.Body)
+			}
+		})
+	}
+	// Even the one path this identity is admitted on, it can only reach as POST
+	// revoke-principal — a create-only PUT with the matching header still isn't it.
+	expect(t, e.do(t, grantsAcme, "PUT", "/api/backends/lake/objects/incoming/x.csv", "x", "If-None-Match", "*"), 403)
+
+	if data := e.do(t, alice, "GET", "/api/backends/lake/objects/f.txt", nil).Body.String(); data != "x" {
+		t.Errorf("a refused request still touched data: %q", data)
 	}
 }
 

@@ -69,10 +69,40 @@ A grant:
     invalid.
 - **`DELETE /{id}`** removes one grant. A second delete of the same id is `404`.
 - **`revoke-principal`** removes every live grant the principal holds in the workspace, across
-  every backend, in one statement. It answers `{"revoked": n, "items": [grant, …]}`.
-  **`booth-streamlit` calls this on take-ownership, as part of the same step as the owner change,
-  and must fail closed** if this module can't be reached or answers non-2xx: the owner change
-  doesn't happen. It is idempotent (`revoked: 0`, `items: []` the second time).
+  every backend, in one statement. It answers `{"revoked": n, "items": [grant, …]}`. It is
+  idempotent (`revoked: 0`, `items: []` the second time). Two different callers may reach it — see
+  below.
+
+### `revoke-principal`'s second caller: the grants-service identity (ADR 0117 item 1a)
+
+`booth-streamlit` cannot hold a person's token: its UI is reached through core's iframe proxy,
+which gives it a signed identity assertion, not a bearer token. So `revoke-principal` — and only
+`revoke-principal` — also accepts a **core-minted workload token `booth-streamlit` mints for
+itself**:
+
+```
+POST /api/admin/upload-grants/revoke-principal
+Authorization: Bearer <core-minted token, subject streamlit:<workspace>:grants, booth_module=streamlit>
+X-Booth-Workspace: <that same workspace>
+{"principal": "streamlit:<that workspace>:<appId>"}
+```
+
+- The subject must be the literal `streamlit:<workspace>:grants`, and the token's `booth_module`
+  claim must be `streamlit` — this module checks both, so a different module can't claim this
+  identity merely by guessing the subject shape. `X-Booth-Workspace` must equal the token's own
+  embedded workspace (never trusted alone, same as every other header this module reads).
+- This identity is refused on **every other route** in this module — grant create, list and
+  delete-by-id; every backend and object route; everything. It satisfies none of
+  `CanRead`/`CanWrite`/`IsAdmin`, even though the token it presents carries a real, viewer-capped
+  workspace-membership claim core mints it with: that claim is deliberately not honoured here.
+- Even on `revoke-principal`, it may only name a principal shaped `streamlit:<its own
+  workspace>:<appId>` — never another workspace's, never a non-app subject, and never the literal
+  `…:grants` subject itself (reserved: `POST /api/admin/upload-grants` already refuses an owner
+  trying to create a grant for that principal, so there is never anything to revoke there).
+  Anything else is `403`.
+- `booth-streamlit` calls this on take-ownership, as part of the same step as the owner change,
+  and **must fail closed** if this module can't be reached or answers non-2xx: the owner change
+  doesn't happen.
 
 Every create, delete and revoke is logged on stdout (`audit: …`, ADR 0022) with the workspace,
 grant id, principal, backend and the owner who acted — never the grant's byte contents, because
@@ -131,12 +161,37 @@ endpoint or bucket) resets the result, since nothing proved the new server's beh
 | `auth.Middleware` (this module) | Re-derives the caller's role from the verified token, independent of any forwarded header (ADR 0041); a token granting no role in the workspace |
 | `internal/uploadgrant` | Any write outside a live grant's principal, backend, prefix, extension allowlist or size cap |
 | `internal/backend` (per kind) | The actual create-only precondition, atomically, per kind — never checked-then-written |
+| `revoke-principal`'s own check (ADR 0117 item 1a) | A grants-service identity naming anything but `streamlit:<its own workspace>:<appId>`; that identity on every other route |
 
 ## What `booth-streamlit` needs to do
 
-- Call the management API above *as the signed-in owner* for its "Write targets" panel — not a
-  record of its own, and not core's: this module holds the grant.
+- It cannot hold a person's token (core's iframe proxy, not a bearer token), so the owner makes
+  the grant **in this module's own Admin page**, with the owner's own token — not a record of
+  `booth-streamlit`'s own, and not core's. `booth-streamlit`'s "Write targets" panel links to that
+  page with the app's principal, backend and prefix filled in (see "URL prefill" below).
 - Call the create-only write exactly as described above: the app's own token, unchanged,
   `If-None-Match: *`, through the gateway.
-- Call `revoke-principal` on take-ownership, and fail the ownership change closed if that call
-  doesn't come back `2xx`.
+- On take-ownership, mint itself a workload token (subject `streamlit:<workspace>:grants`,
+  `booth_module: streamlit`, viewer cap) and call `revoke-principal` with it, and fail the
+  ownership change closed if that call doesn't come back `2xx`.
+
+## URL prefill for the Admin page's "App uploads" panel
+
+A link from `booth-streamlit`'s "Write targets" panel into this module's Admin page may carry
+query parameters that prefill the grant-creation form (storage-ui, not this HTTP API — listed
+here because the names are part of what `booth-streamlit` builds against):
+
+```
+/admin?panel=upload-grants&principal=streamlit%3Aacme%3Aa2b3c4&backendId=lake&prefix=incoming
+```
+
+| Parameter | Prefills |
+|---|---|
+| `panel=upload-grants` | Opens directly to the "App uploads" panel |
+| `principal` | The principal field (`streamlit:<workspace>:<appId>`) |
+| `backendId` | The backend select |
+| `prefix` | The prefix field |
+
+All three are plain prefill: the owner still reviews and submits the form. An unknown
+`backendId` or a malformed `principal` is left for the ordinary form validation to catch on
+submit, the same as if the owner had typed it.

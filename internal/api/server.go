@@ -124,12 +124,19 @@ func NewRouter(deps Deps) http.Handler {
 			r.Post("/test-connection", s.handleAdminTestNew)
 
 			// Upload grants (ADR 0117 "Reconciled design" item 1/8a): owner-only, no
-			// update route — narrowing a grant is delete-and-recreate.
+			// update route — narrowing a grant is delete-and-recreate. revoke-principal
+			// is deliberately NOT here — see below.
 			r.Get("/upload-grants", s.handleAdminListUploadGrants)
 			r.Post("/upload-grants", s.handleAdminCreateUploadGrant)
 			r.Delete("/upload-grants/{id}", s.handleAdminDeleteUploadGrant)
-			r.Post("/upload-grants/revoke-principal", s.handleAdminRevokeUploadGrantsByPrincipal)
 		})
+
+		// revoke-principal (ADR 0117 item 1a) sits outside the owner-only /api/admin
+		// group on purpose: it also accepts booth-streamlit's revoke-only
+		// grants-service identity (auth.Identity.IsGrantsService), which IsAdmin would
+		// refuse. handleRevokeUploadGrantsByPrincipal does its own inline check for
+		// exactly those two identities and nothing else.
+		r.Post("/api/admin/upload-grants/revoke-principal", s.handleRevokeUploadGrantsByPrincipal)
 	})
 
 	return r
@@ -737,17 +744,42 @@ type revokePrincipalRequest struct {
 	Principal string `json:"principal"`
 }
 
-// handleAdminRevokeUploadGrantsByPrincipal mirrors booth-api's
+// handleRevokeUploadGrantsByPrincipal mirrors booth-api's
 // POST /api/write-grants/revoke-principal exactly: revokes every live grant the
-// principal holds in the workspace, across every backend, in one call. booth-streamlit
-// calls this on take-ownership and must fail closed on anything but success — the
-// {"revoked", "items"} shape and idempotency (0 the second time) are what let it do that.
-func (s *server) handleAdminRevokeUploadGrantsByPrincipal(w http.ResponseWriter, r *http.Request) {
+// principal holds in the workspace, across every backend, in one call. The
+// {"revoked", "items"} shape and idempotency (0 the second time) are what let a caller
+// fail closed on anything but success.
+//
+// Two identities may call this, and nothing else may (ADR 0117 item 1/1a):
+//   - A workspace owner, same as every other upload-grants admin route, revoking
+//     whatever principal it names.
+//   - booth-streamlit's own revoke-only grants-service identity
+//     (auth.Identity.IsGrantsService), which holds no admin role at all. It can only
+//     ever reach this one route (every other route gates on CanRead/CanWrite/IsAdmin,
+//     none of which that identity satisfies), and even here it is restricted to
+//     principals shaped streamlit:<its own workspace>:<appId> — it cannot revoke
+//     anything outside what booth-streamlit itself could have declared. This is how
+//     booth-streamlit revokes an app's upload grants on take-ownership without ever
+//     holding a person's token (it is reached through core's iframe proxy, never a
+//     bearer token of its own).
+func (s *server) handleRevokeUploadGrantsByPrincipal(w http.ResponseWriter, r *http.Request) {
 	var req revokePrincipalRequest
 	if !decodeBody(w, r, &req) {
 		return
 	}
 	id := identity(r)
+	switch {
+	case id.IsAdmin():
+		// unrestricted, as today.
+	case id.IsGrantsService():
+		if err := uploadgrant.ValidatePrincipal(req.Principal, id.Workspace); err != nil {
+			auth.WriteError(w, http.StatusForbidden, "the grants-service identity may only revoke streamlit:<its workspace>:<appId> principals")
+			return
+		}
+	default:
+		auth.WriteError(w, http.StatusForbidden, "only a workspace owner or booth-streamlit's own revoke-only service identity may revoke upload grants")
+		return
+	}
 	revoked, err := s.Grants.RevokePrincipal(r.Context(), id.Workspace, req.Principal)
 	if err != nil {
 		writeGrantError(w, err)

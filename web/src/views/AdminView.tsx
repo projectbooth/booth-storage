@@ -2,10 +2,28 @@ import { useState } from "react";
 import { deleteBackend, fetchAdminBackends, fetchKinds, testSavedBackend, type ApiContext } from "../api/client";
 import { BackendForm } from "../components/BackendForm";
 import { Banner, Button, KindBadge, PageHeader } from "../components/ui";
+import { UploadGrantsPanel } from "../components/UploadGrantsPanel";
+import type { UploadGrantPrefill } from "../components/UploadGrantForm";
 import { errorMessage, useLoad } from "../hooks";
 import type { AdminBackend, TestResult, WorkspaceRole } from "../types";
 
 type Mode = { kind: "list" } | { kind: "create" } | { kind: "edit"; backend: AdminBackend };
+
+type Panel = "backends" | "upload-grants";
+
+/** Read once at mount, not on every render: a link from booth-streamlit's "Write
+ *  targets" panel sets these in the address bar to open this page straight to the
+ *  grant form with its principal, backend and prefix filled in (see
+ *  docs/contracts/upload-grants.md's "URL prefill"). After that, tab clicks are this
+ *  page's own business — the URL doesn't fight the owner for it. */
+function initialPanelAndPrefill(): { panel: Panel; prefill?: UploadGrantPrefill } {
+  const q = new URLSearchParams(window.location.search);
+  if (q.get("panel") !== "upload-grants") return { panel: "backends" };
+  const principal = q.get("principal") ?? undefined;
+  const backendId = q.get("backendId") ?? undefined;
+  const prefix = q.get("prefix") ?? undefined;
+  return { panel: "upload-grants", prefill: principal || backendId || prefix ? { principal, backendId, prefix } : undefined };
+}
 
 /** The admin view (ADR 0036): register, edit, test and remove backends and their
  *  credentials. Reached at the manifest's adminNavPath.
@@ -29,6 +47,9 @@ export function AdminView({ ctx, role, onOpenBrowse }: { ctx: ApiContext; role: 
 }
 
 function OwnerAdmin({ ctx, onOpenBrowse }: { ctx: ApiContext; onOpenBrowse: () => void }) {
+  const [{ panel: initialPanel, prefill }] = useState(initialPanelAndPrefill);
+  const [panel, setPanel] = useState<Panel>(initialPanel);
+
   const backends = useLoad(() => fetchAdminBackends(ctx), [ctx.workspace]);
   const kinds = useLoad(() => fetchKinds(ctx), [ctx.workspace]);
 
@@ -69,18 +90,44 @@ function OwnerAdmin({ ctx, onOpenBrowse }: { ctx: ApiContext; onOpenBrowse: () =
 
   return (
     <div className="flex flex-col gap-4 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div role="tablist" aria-label="Admin sections" className="flex gap-1 rounded-md border border-slate-200 p-1 dark:border-slate-800">
+          {([
+            ["backends", "Backends"],
+            ["upload-grants", "App uploads"],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={panel === key}
+              onClick={() => setPanel(key)}
+              className={`rounded px-3 py-1 text-sm font-medium ${
+                panel === key
+                  ? "bg-indigo-600 text-white"
+                  : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <Button onClick={onOpenBrowse}>Back to storage</Button>
+      </div>
+
+      {panel === "upload-grants" && <UploadGrantsPanel ctx={ctx} backends={list} prefill={prefill} />}
+
+      {panel === "backends" && (
+        <>
       <PageHeader
         title="Manage storage backends"
         subtitle="Register the storage this workspace can use, and the credentials to reach it. Every registered backend stays available side by side."
         actions={
-          <>
-            <Button onClick={onOpenBrowse}>Back to storage</Button>
-            {mode.kind === "list" && (
-              <Button variant="primary" onClick={() => { setNotice(null); setMode({ kind: "create" }); }}>
-                Add backend
-              </Button>
-            )}
-          </>
+          mode.kind === "list" && (
+            <Button variant="primary" onClick={() => { setNotice(null); setMode({ kind: "create" }); }}>
+              Add backend
+            </Button>
+          )
         }
       />
 
@@ -194,6 +241,8 @@ function OwnerAdmin({ ctx, onOpenBrowse }: { ctx: ApiContext; onOpenBrowse: () =
             </tbody>
           </table>
         </div>
+      )}
+        </>
       )}
     </div>
   );

@@ -18,6 +18,7 @@ func TestService_CreateValidation(t *testing.T) {
 		{"not an app principal", CreateInput{Principal: "alice", BackendID: "lake", Prefix: "a", Extensions: []string{"csv"}, MaxBytes: 1}, "principal"},
 		{"booth-api sidecar principal rejected here", CreateInput{Principal: "apiwrite:some-api", BackendID: "lake", Prefix: "a", Extensions: []string{"csv"}, MaxBytes: 1}, "principal"},
 		{"missing backend", CreateInput{Principal: "streamlit:acme:app1", Prefix: "a", Extensions: []string{"csv"}, MaxBytes: 1}, "backendId"},
+		{"reserved grants appId", CreateInput{Principal: "streamlit:acme:grants", BackendID: "lake", Prefix: "a", Extensions: []string{"csv"}, MaxBytes: 1}, "principal"},
 		{"bad prefix traversal", CreateInput{Principal: "streamlit:acme:app1", BackendID: "lake", Prefix: "../x", Extensions: []string{"csv"}, MaxBytes: 1}, ""},
 		{"no extensions", CreateInput{Principal: "streamlit:acme:app1", BackendID: "lake", Prefix: "a", MaxBytes: 1}, "extensions"},
 		{"bad extension with embedded dot", CreateInput{Principal: "streamlit:acme:app1", BackendID: "lake", Prefix: "a", Extensions: []string{"c.sv"}, MaxBytes: 1}, ""},

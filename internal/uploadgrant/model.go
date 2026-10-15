@@ -92,12 +92,20 @@ func principalWorkspace(principal string) (string, bool) {
 	return m[1], true
 }
 
+// reservedAppID is the one <appId> ValidatePrincipal refuses outright: ADR 0117 item 1a
+// reserves the literal subject "streamlit:<workspace>:grants" for booth-streamlit's own
+// revoke-only service identity, so no owner-created grant may ever collide with it.
+const reservedAppID = "grants"
+
 // ValidatePrincipal checks principal is a well-formed app-token subject for workspace —
 // mirroring booth-api's "400: the principal isn't an app in this workspace".
 func ValidatePrincipal(principal, workspace string) error {
 	ws, ok := principalWorkspace(principal)
 	if !ok {
 		return invalid("principal", "must be an app's workload-token subject, streamlit:<workspace>:<appId>")
+	}
+	if strings.HasSuffix(principal, ":"+reservedAppID) {
+		return invalid("principal", "%q is reserved for booth-streamlit's own revoke-only service identity (ADR 0117 item 1a)", reservedAppID)
 	}
 	if ws != workspace {
 		return invalid("principal", "names workspace %q, not %q", ws, workspace)
