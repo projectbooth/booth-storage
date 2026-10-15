@@ -182,7 +182,7 @@ query parameters that prefill the grant-creation form (storage-ui, not this HTTP
 here because the names are part of what `booth-streamlit` builds against):
 
 ```
-/admin?panel=upload-grants&principal=streamlit%3Aacme%3Aa2b3c4&backendId=lake&prefix=incoming
+/storage/admin?panel=upload-grants&principal=streamlit%3Aacme%3Aa2b3c4&backendId=lake&prefix=incoming
 ```
 
 | Parameter | Prefills |
