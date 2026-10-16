@@ -112,6 +112,71 @@ route/view prop and renders no nav link to `adminNavPath`.
 - [0005](docs/decisions/0005-workload-token-issuer.md) — optionally trusts booth-core's JWKS as a second token issuer for unattended-run (workload) tokens (ADR 0056); off unless `oidc.workloadIssuerUrl` is set.
 - [0006](docs/decisions/0006-s3-credential-broker-provider-design.md) — optionally mints short-lived `s3` credentials for the ADR 0080/0088 credential broker (real Iceberg/native access, e.g. booth-lakehouse); off unless `credentialBroker.enabled` is set, and only self-hosted MinIO-compatible backends can actually issue one today (real AWS S3 backends refuse every request — see the doc for why).
 
+## Registering a SeaweedFS-backed backend
+
+SeaweedFS registers as an ordinary `s3`-kind backend (same `minio-go` client, no new backend
+kind) with one extra config field that switches how the ADR 0080/0088 credential broker mints
+scoped credentials for it: `credentialProvider: "seaweedfs-iam"` (default is MinIO's admin API;
+see [decision 0006](docs/decisions/0006-s3-credential-broker-provider-design.md)). Register one
+backend per bucket via the owner-only admin API, e.g. for the homelab's `lake` bucket:
+
+```json
+POST /api/admin/backends
+{
+  "id": "seaweedfs-lake",
+  "displayName": "SeaweedFS - lake",
+  "kind": "s3",
+  "config": {
+    "endpoint": "http://seaweedfs.booth-objectstore.svc.cluster.local:8333",
+    "region": "us-east-1",
+    "bucket": "lake",
+    "pathStyle": true,
+    "credentialProvider": "seaweedfs-iam"
+  },
+  "credentials": {
+    "accessKeyId": "<SeaweedFS admin access key>",
+    "secretAccessKey": "<SeaweedFS admin secret key>"
+  }
+}
+```
+
+Repeat with `"bucket": "spark"` for the Spark-runs backend. The bucket itself must already exist
+in SeaweedFS — this module never creates buckets.
+
+**How the admin credential actually reaches this module (ADR 0039):** there is no Secret this
+module reads from another namespace, and nothing to copy between namespaces at the Kubernetes
+level — its service account can only `get/create/update/delete` Secrets in **its own** namespace
+(default `booth-storage`, overridden by `BOOTH_NAMESPACE`/the chart's release namespace; never
+`booth-objectstore`), with no `list`/`watch`/`ClusterRole`. The credential reaches it the one way
+ADR 0039 allows: an owner calls this module's own `POST /api/admin/backends` (above) with the
+access key and secret key in the request body, over the authenticated API — and this module then
+writes them into a Secret it creates itself, named `sha256(workspace + "\x00" + id)`, in its own
+namespace. The value is never readable back out (write-only; `GET`/edit routes never return it).
+
+So "moving the key between namespaces" is really "read it once from SeaweedFS's Secret without
+printing it, and hand it straight to this module's admin API, without it ever landing in a shell
+history or log." One way to do that:
+
+```sh
+ACCESS_KEY=$(kubectl get secret seaweedfs-admin-keys -n booth-objectstore -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d)
+SECRET_KEY=$(kubectl get secret seaweedfs-admin-keys -n booth-objectstore -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)
+
+curl -s -X POST "$BOOTH_GATEWAY/modules/storage/api/admin/backends" \
+  -H "Authorization: Bearer $OWNER_TOKEN" -H "X-Workspace: $WORKSPACE" \
+  -H "Content-Type: application/json" \
+  --data "$(jq -n --arg ak "$ACCESS_KEY" --arg sk "$SECRET_KEY" '{
+    id: "seaweedfs-lake", displayName: "SeaweedFS - lake", kind: "s3",
+    config: {endpoint: "http://seaweedfs.booth-objectstore.svc.cluster.local:8333",
+             region: "us-east-1", bucket: "lake", pathStyle: true,
+             credentialProvider: "seaweedfs-iam"},
+    credentials: {accessKeyId: $ak, secretAccessKey: $sk}
+  }')"
+unset ACCESS_KEY SECRET_KEY
+```
+
+Neither variable is ever `echo`ed, so plain terminal output and shell history stay clean (avoid
+`curl -v`/`set -x`, which would print the body). Repeat for `spark` with a second `id`.
+
 ## Behaviors worth knowing
 
 - **Database (ADR 0053/0054).** The manifest declares `database: {enabled: true}`, so booth-core
