@@ -58,7 +58,12 @@ export function BackendForm({
   const [showLocalErrors, setShowLocalErrors] = useState(false);
 
   const def = KIND_DEFS[kind];
-  const typedCredentials = buildCredentials(kind, creds) !== undefined;
+  // Drop a hidden credential field's value (e.g. a session token left over from before a
+  // credential provider that never uses one was chosen) rather than silently submitting it.
+  const visibleCreds = Object.fromEntries(
+    Object.entries(creds).filter(([k]) => !def.credentialFields.find((f) => f.key === k)?.hiddenWhen?.(config)),
+  );
+  const typedCredentials = buildCredentials(kind, visibleCreds) !== undefined;
 
   // ---- local validation (saves a round trip; the server re-validates) ----
   const localErrors: Record<string, string> = {};
@@ -94,7 +99,7 @@ export function BackendForm({
   }
 
   function credentialsForRequest(): Record<string, string> | undefined {
-    const typed = buildCredentials(kind, creds);
+    const typed = buildCredentials(kind, visibleCreds);
     if (typed) return typed;
     // Explicit, opt-in clearing on edit: an empty object replaces the stored set with none.
     if (editing && clearCreds) return {};
@@ -229,23 +234,49 @@ export function BackendForm({
 
       <fieldset className="flex flex-col gap-3" disabled={busy}>
         <legend className="mb-1 text-sm font-medium text-slate-700 dark:text-slate-200">Location</legend>
-        {def.configFields.map((f) =>
-          f.type === "checkbox" ? (
-            <div key={f.key} className="flex flex-col gap-1">
-              <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-                <input
-                  type="checkbox"
-                  checked={config[f.key] === true}
-                  onChange={(e) => {
-                    setConfig((c) => ({ ...c, [f.key]: e.target.checked }));
-                    touch();
-                  }}
-                />
-                {f.label}
-              </label>
-              {f.help && <p className="text-xs text-slate-500 dark:text-slate-400">{f.help}</p>}
-            </div>
-          ) : (
+        {def.configFields.map((f) => {
+          if (f.type === "checkbox") {
+            return (
+              <div key={f.key} className="flex flex-col gap-1">
+                <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={config[f.key] === true}
+                    onChange={(e) => {
+                      setConfig((c) => ({ ...c, [f.key]: e.target.checked }));
+                      touch();
+                    }}
+                  />
+                  {f.label}
+                </label>
+                {f.help && <p className="text-xs text-slate-500 dark:text-slate-400">{f.help}</p>}
+              </div>
+            );
+          }
+          if (f.type === "select") {
+            return (
+              <Field key={f.key} id={`bf-cfg-${f.key}`} label={f.label} help={f.help} required={f.required} error={errorFor(f.key)}>
+                {(p) => (
+                  <select
+                    {...p}
+                    className={inputClass}
+                    value={(config[f.key] as string | undefined) ?? ""}
+                    onChange={(e) => {
+                      setConfig((c) => ({ ...c, [f.key]: e.target.value }));
+                      touch();
+                    }}
+                  >
+                    {(f.options ?? []).map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+            );
+          }
+          return (
             <Field key={f.key} id={`bf-cfg-${f.key}`} label={f.label} help={f.help} required={f.required} error={errorFor(f.key)}>
               {(p) => (
                 <input
@@ -263,8 +294,8 @@ export function BackendForm({
                 />
               )}
             </Field>
-          ),
-        )}
+          );
+        })}
       </fieldset>
 
       {def.credentialFields.length > 0 && (
@@ -278,7 +309,8 @@ export function BackendForm({
                 : "No credentials are stored."
               : "Stored as a Kubernetes Secret, never in the database."}
           </p>
-          {def.credentialFields.map((f) => (
+          {def.credentialNote?.(config) && <Banner tone="info">{def.credentialNote(config)}</Banner>}
+          {def.credentialFields.filter((f) => !f.hiddenWhen?.(config)).map((f) => (
             <Field key={f.key} id={`bf-cred-${f.key}`} label={f.label} help={f.help} error={errorFor(f.key)}>
               {(p) =>
                 f.multiline ? (

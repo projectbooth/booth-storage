@@ -91,7 +91,40 @@ describe("valuesFromConfig", () => {
       region: "",
       prefix: "",
       pathStyle: true,
+      credentialProvider: "",
     });
+  });
+});
+
+describe("s3's credentialProvider field (ADR 0118)", () => {
+  it("offers the MinIO-admin default and SeaweedFS IAM", () => {
+    const f = KIND_DEFS.s3.configFields.find((f) => f.key === "credentialProvider");
+    expect(f?.type).toBe("select");
+    expect(f?.options).toEqual([
+      { value: "", label: "MinIO admin API (default)" },
+      { value: "seaweedfs-iam", label: "SeaweedFS IAM" },
+    ]);
+  });
+
+  it("hides the session token field only when SeaweedFS IAM is chosen", () => {
+    const sessionToken = KIND_DEFS.s3.credentialFields.find((f) => f.key === "sessionToken");
+    expect(sessionToken?.hiddenWhen?.({})).toBeFalsy();
+    expect(sessionToken?.hiddenWhen?.({ credentialProvider: "" })).toBeFalsy();
+    expect(sessionToken?.hiddenWhen?.({ credentialProvider: "seaweedfs-iam" })).toBe(true);
+  });
+
+  it("notes that SeaweedFS IAM mints keys with no session token, and only then", () => {
+    expect(KIND_DEFS.s3.credentialNote?.({})).toBeUndefined();
+    expect(KIND_DEFS.s3.credentialNote?.({ credentialProvider: "seaweedfs-iam" })).toMatch(/no session token/);
+  });
+
+  it("round-trips through buildConfig/valuesFromConfig like any other field", () => {
+    expect(buildConfig("s3", { bucket: "b", credentialProvider: "seaweedfs-iam" })).toEqual({
+      bucket: "b",
+      credentialProvider: "seaweedfs-iam",
+    });
+    expect(buildConfig("s3", { bucket: "b", credentialProvider: "" })).toEqual({ bucket: "b" }); // default omitted
+    expect(valuesFromConfig("s3", { bucket: "b", credentialProvider: "seaweedfs-iam" }).credentialProvider).toBe("seaweedfs-iam");
   });
 });
 

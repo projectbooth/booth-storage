@@ -11,12 +11,17 @@ export interface FieldDef {
   help?: string;
   placeholder?: string;
   required?: boolean;
-  type?: "text" | "checkbox";
+  type?: "text" | "checkbox" | "select";
+  /** Choices for a "select" field. */
+  options?: { value: string; label: string }[];
 }
 
 export interface CredentialFieldDef extends FieldDef {
   /** Render as a masked input. Every credential is treated as secret. */
   multiline?: boolean;
+  /** Hide this credential field given the current config values (e.g. a credential
+   *  provider whose minted keys never carry a session token). */
+  hiddenWhen?: (config: FieldValues) => boolean;
 }
 
 export interface KindDef {
@@ -27,6 +32,8 @@ export interface KindDef {
   credentialFields: CredentialFieldDef[];
   /** Plain-language rule for the credential fields, shown above them. */
   credentialHelp?: string;
+  /** Extra note shown with the credentials, depending on the current config values. */
+  credentialNote?: (config: FieldValues) => string | undefined;
 }
 
 export const KIND_DEFS: Record<BackendKind, KindDef> = {
@@ -45,13 +52,32 @@ export const KIND_DEFS: Record<BackendKind, KindDef> = {
       { key: "region", label: "Region", placeholder: "us-east-1" },
       { key: "prefix", label: "Key prefix", help: "Confine this backend to one prefix inside the bucket." },
       { key: "pathStyle", label: "Use path-style addressing", type: "checkbox", help: "Needed by MinIO and most self-hosted stores." },
+      {
+        key: "credentialProvider",
+        label: "Credential provider",
+        type: "select",
+        help: "How the credential broker (ADR 0080/0088) mints short-lived scoped credentials for this backend.",
+        options: [
+          { value: "", label: "MinIO admin API (default)" },
+          { value: "seaweedfs-iam", label: "SeaweedFS IAM" },
+        ],
+      },
     ],
     credentialFields: [
       { key: "accessKeyId", label: "Access key ID" },
       { key: "secretAccessKey", label: "Secret access key" },
-      { key: "sessionToken", label: "Session token", help: "Optional, for temporary credentials." },
+      {
+        key: "sessionToken",
+        label: "Session token",
+        help: "Optional, for temporary credentials.",
+        hiddenWhen: (config) => config.credentialProvider === "seaweedfs-iam",
+      },
     ],
     credentialHelp: "Provide the access key ID and secret together, or leave both empty for anonymous access.",
+    credentialNote: (config) =>
+      config.credentialProvider === "seaweedfs-iam"
+        ? "SeaweedFS IAM mints scoped access keys with no session token — only the access key ID and secret access key below are used."
+        : undefined,
   },
   filesystem: {
     kind: "filesystem",

@@ -120,6 +120,45 @@ describe("registering a backend", () => {
     expect(form.getByLabelText("Session token")).toHaveAttribute("type", "password");
   });
 
+  // ADR 0118: the seaweedfs-iam credential provider mints keys with no session token.
+  it("offers a Credential provider choice for S3, hiding the session token field and noting why when SeaweedFS IAM is chosen", async () => {
+    mockFetch(baseRoutes([]));
+    const user = userEvent.setup();
+    mount();
+    const form = within(await openCreateForm(user));
+
+    expect(form.getByLabelText("Credential provider")).toHaveValue(""); // MinIO admin API, today's default
+    expect(form.getByLabelText("Session token")).toBeInTheDocument();
+    expect(form.queryByText(/no session token/)).not.toBeInTheDocument();
+
+    await user.selectOptions(form.getByLabelText("Credential provider"), "seaweedfs-iam");
+    expect(form.queryByLabelText("Session token")).not.toBeInTheDocument();
+    expect(form.getByText(/SeaweedFS IAM mints scoped access keys with no session token/)).toBeInTheDocument();
+
+    await user.selectOptions(form.getByLabelText("Credential provider"), ""); // switching back restores it
+    expect(form.getByLabelText("Session token")).toBeInTheDocument();
+  });
+
+  it("omits credentialProvider from the request when left at its default, and sends it when chosen", async () => {
+    const m = mockFetch([...baseRoutes([]), ["POST /admin/backends", () => ok(adminFixture({ displayName: "Data lake" }))]]);
+    const user = userEvent.setup();
+    mount();
+    const form = within(await openCreateForm(user));
+
+    await user.type(form.getByLabelText("Display name"), "Lake");
+    await user.type(form.getByLabelText(/^Bucket/), "lake");
+    await user.selectOptions(form.getByLabelText("Credential provider"), "seaweedfs-iam");
+    await user.type(form.getByLabelText("Access key ID"), "AKIA123");
+    await user.type(form.getByLabelText("Secret access key"), "s3cr3t-value");
+    await user.click(form.getByRole("button", { name: "Add backend" }));
+
+    await waitFor(() => expect(m.calls("POST", /admin\/backends$/)).toHaveLength(1));
+    const body = m.calls("POST", /admin\/backends$/)[0].body as Record<string, unknown>;
+    expect(body).toMatchObject({ config: { bucket: "lake", credentialProvider: "seaweedfs-iam" } });
+    expect(body).toMatchObject({ credentials: { accessKeyId: "AKIA123", secretAccessKey: "s3cr3t-value" } });
+    expect(body.credentials).not.toHaveProperty("sessionToken");
+  });
+
   // ADR 0013: all four kinds are registerable, each with its own fields.
   it.each<[BackendKind, string[], string[]]>([
     ["s3", ["Bucket", "Endpoint", "Region"], ["Access key ID", "Secret access key"]],
@@ -312,6 +351,19 @@ describe("editing a backend — credentials are write-only", () => {
     expect(form.getByLabelText("Access key ID")).toHaveValue("");
     expect(form.getByLabelText("Secret access key")).toHaveValue("");
     expect(form.getByLabelText("Secret access key")).toHaveAttribute("placeholder", "Leave blank to keep the stored value");
+  });
+
+  it("seeds Credential provider on Edit too, hiding Session token for an existing SeaweedFS IAM backend", async () => {
+    mockFetch(
+      baseRoutes([adminFixture({ displayName: "Data lake", config: { bucket: "lake", credentialProvider: "seaweedfs-iam" } })]),
+    );
+    const user = userEvent.setup();
+    mount();
+    const form = await openEdit(user, "Data lake");
+
+    expect(form.getByLabelText("Credential provider")).toHaveValue("seaweedfs-iam");
+    expect(form.queryByLabelText("Session token")).not.toBeInTheDocument();
+    expect(form.getByText(/SeaweedFS IAM mints scoped access keys with no session token/)).toBeInTheDocument();
   });
 
   it("blank credentials means KEEP: the request carries no `credentials` key", async () => {
