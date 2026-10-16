@@ -87,7 +87,7 @@ object store needs for this class of client, not a verified S3A-specific trace:
 | `CopyObject` | S3A rename (object stores have no native rename) | High |
 | `CreateMultipartUpload` / `UploadPart` / `CompleteMultipartUpload` / `AbortMultipartUpload` / `ListParts` | S3A large writes above its multipart threshold | High (standard flow; not S3A-specific-verified) |
 | Conditional `PutObject` (`If-None-Match`) | **Iceberg's own atomic-commit primitive**, confirmed by this session's search: Iceberg (and Delta Lake) use S3's conditional-write support so only one of two competing commit writers succeeds, the other retries cleanly | Medium-high — multiple independent sources describe this as *the* mechanism, but none I found names `S3FileIO`'s code path specifically |
-| *(none found)* | **Lakekeeper itself appears not to perform data-plane S3 operations at all** — every source found describes it vending (or remote-signing) credentials that the query engine then uses to talk to S3 directly, bypassing the catalog server for data I/O | Medium — consistent across several independent descriptions of the vended-credential pattern, but I found no explicit Lakekeeper-source confirmation that it never touches S3 data itself (e.g., for purge-on-drop) |
+| `DeleteObject` / bulk delete, and general read/write under `assume-role-arn` | **Correction: Lakekeeper does perform data-plane S3 operations itself — it is not credential-vending-only.** Lakekeeper's own docs confirm it deletes files server-side on a managed-table drop ("Lakekeeper handles file removal for managed tables"; purge defaults on for managed tables) and during `expire_snapshots` maintenance ("Affects all file deletion operations, including maintenance procedures like `expire_snapshots`"). In "remote signing" mode it holds its own standing credentials and signs the client's request with them ("it signs the request with its own credentials..."), and when `assume-role-arn` is configured, "the specified `assume-role-arn` is used for Lakekeeper's reads and writes of the object store... for every IO Operation of Lakekeeper." (docs.lakekeeper.io, "concepts" and "storage" pages, version-specific — current/0.13.x as checked) | High — direct quotes from Lakekeeper's own documentation, not inferred |
 
 **Consolidated minimum surface**: Get/Head/Put/conditional-Put/Delete/bulk-Delete/Copy/List(v2)
 objects, plus the five-call multipart set. This matches almost exactly what
@@ -240,9 +240,12 @@ genuinely new subsystems; everything else leans on code this module already has.
   that happens entirely inside whatever catalog client library Lakekeeper's own REST protocol
   uses — found strong general evidence that *S3 conditional writes* are the mechanism competing
   Iceberg/Delta writers rely on, but no source confirming the exact code path (§3).
-- Whether Lakekeeper ever issues S3 operations itself (e.g., purge-on-drop cleanup) rather than
-  purely vending credentials for engines to use directly — found consistent descriptions of the
-  vended-credential *data* path, nothing confirming or ruling out a server-side purge path (§3).
+- ~~Whether Lakekeeper ever issues S3 operations itself~~ — **resolved, not merely confirmed**: it
+  does. Lakekeeper's own docs state it deletes files server-side on managed-table drop and during
+  `expire_snapshots` maintenance, holds its own standing credentials to sign requests in remote-
+  signing mode, and — when `assume-role-arn` is configured — uses that role for all of its own
+  reads and writes of the object store, not only for what it vends or signs on a client's behalf
+  (§3, corrected).
 - Real throughput under Spark-scale concurrent Range GETs and concurrent large multipart writes
   (§7) — this is a feasibility note, no load test was run.
 - Current (2026) license/maintenance/conditional-PUT/credential-flexibility facts for Zenko
