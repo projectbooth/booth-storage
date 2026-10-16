@@ -60,6 +60,27 @@ type MintRequest struct {
 	// field for one — docs/decisions/0006 §1). true means a session token is fine if the
 	// credential naturally has one; it does not require one to be present.
 	AllowSessionToken bool
+	// RecordLease is called by the seaweedfs-iam path immediately after a SeaweedFS IAM
+	// user and access key are minted, before MintScopedCredential returns — not after —
+	// so a crash in between never mints a credential this module doesn't know to sweep
+	// (ADR 0118 ruling 3, docs/design-seaweedfs-provider.md section 4). The caller (
+	// internal/credentialbroker) fills in lease identity (lease ID, workspace, backend
+	// ID) this package has no concept of. nil for any other credential provider; if the
+	// seaweedfs-iam path is reached with RecordLease nil, or RecordLease returns an
+	// error, the just-minted user and key are deleted and the mint fails outright rather
+	// than return an untracked credential.
+	RecordLease func(ctx context.Context, lease SeaweedFSLease) error
+}
+
+// SeaweedFSLease is what the seaweedfs-iam path hands to MintRequest.RecordLease — only
+// the fields this package itself produces.
+type SeaweedFSLease struct {
+	IAMUserName string
+	AccessKeyID string
+	Prefix      string
+	Access      string
+	ExpiresAt   time.Time
+	CreatedAt   time.Time
 }
 
 const (
@@ -107,6 +128,18 @@ func (cfg Config) MintScopedCredential(ctx context.Context, admin Credentials, r
 		return MintedCredential{}, fmt.Errorf("%w: this backend has no admin credentials of its own to derive a scoped one from", ErrScopeNotSupported)
 	}
 
+	keyPrefix := strings.Trim(strings.TrimSuffix(cfg.Prefix, "/")+"/"+strings.TrimSuffix(prefix, "/"), "/")
+
+	if cfg.CredentialProvider == CredentialProviderSeaweedFSIAM {
+		if cfg.Endpoint == "" {
+			return MintedCredential{}, fmt.Errorf("%w: seaweedfs-iam requires a configured endpoint", ErrScopeNotSupported)
+		}
+		if req.AllowSessionToken {
+			return MintedCredential{}, fmt.Errorf("%w: the seaweedfs-iam path only ever issues a bare access-key/secret-key pair, never a session token", ErrScopeNotSupported)
+		}
+		return cfg.mintSeaweedFSIAM(ctx, admin, req, keyPrefix)
+	}
+
 	if cfg.Endpoint == "" {
 		if !req.AllowSessionToken {
 			return MintedCredential{}, fmt.Errorf("%w: real AWS S3 has no way to issue an expiring credential without a session token (plain IAM access keys never expire, and STS output always includes one) — see docs/decisions/0006", ErrScopeNotSupported)
@@ -114,7 +147,6 @@ func (cfg Config) MintScopedCredential(ctx context.Context, admin Credentials, r
 		return MintedCredential{}, fmt.Errorf("%w: real AWS S3 credential issuance (via sts:AssumeRole) is not implemented yet, only self-hosted (MinIO-compatible) backends are", ErrScopeNotSupported)
 	}
 
-	keyPrefix := strings.Trim(strings.TrimSuffix(cfg.Prefix, "/")+"/"+strings.TrimSuffix(prefix, "/"), "/")
 	host, secure, err := cfg.hostAndTLS()
 	if err != nil {
 		return MintedCredential{}, fmt.Errorf("%w: %v", ErrScopeNotSupported, err)

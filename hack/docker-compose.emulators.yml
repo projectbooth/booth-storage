@@ -3,6 +3,7 @@
 # thing a green CI run does. Not used at runtime — this is test tooling only.
 #
 #   docker compose -f hack/docker-compose.emulators.yml up -d --wait
+#   hack/seaweedfs-seed-admin.sh      # seaweedfs boots with zero IAM identities
 #   eval "$(hack/test-env.sh)"        # export the BOOTH_TEST_* variables (bash/zsh)
 #   go test ./...
 #   docker compose -f hack/docker-compose.emulators.yml down -v
@@ -37,6 +38,32 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  seaweedfs:
+    # chrislusf/seaweedfs 4.48, pinned by digest, not tag (same discipline as minio
+    # above — ADR 0087/0091's own finding that even a specific digest can stop being
+    # pullable). The exact digest both design-note spikes ran (docs/design-seaweedfs-
+    # iam-spike.md, docs/design-seaweedfs-provider.md). Embedded S3 + IAM on the same
+    # port: the seaweedfs-iam credential-broker path (internal/backend/s3) mints IAM
+    # users/keys against this container the same way it will against the real homelab
+    # install (ADR 0118).
+    image: chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command:
+      - server
+      - -s3
+      - -s3.ip.bind=0.0.0.0
+      - -s3.iam
+      - -s3.iam.readOnly=false
+      - -s3.iam.config=/etc/seaweedfs/iam.json
+      - -dir=/data
+      - -ip.bind=0.0.0.0
+    volumes:
+      - ./seaweedfs-iam.json:/etc/seaweedfs/iam.json:ro
+    ports: ["19333:8333"]
+    # No container healthcheck here (unlike the services above): the image has neither
+    # mc nor nc to probe with. hack/test-env.sh's caller polls the S3 port directly
+    # instead, then seeds the one admin identity the server boots with none of (see
+    # hack/seaweedfs-seed-admin.sh) — both steps need to run after `up --wait` either way.
 
   postgres:
     image: postgres:16-alpine

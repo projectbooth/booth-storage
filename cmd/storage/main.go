@@ -20,6 +20,8 @@ import (
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/config"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
+	"github.com/projectbooth/booth-storage/internal/seaweedfssweep"
 	"github.com/projectbooth/booth-storage/internal/uploadgrant"
 )
 
@@ -40,11 +42,18 @@ func run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	meta, creds, grants, closeStores, err := openStores(ctx, cfg)
+	meta, creds, grants, leases, closeStores, err := openStores(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer closeStores()
+
+	registrySvc := registry.NewService(meta, creds, registry.FilesystemPolicy{Roots: cfg.FilesystemRoots})
+
+	// ADR 0118 ruling 3: a SeaweedFS IAM bare key has no native expiry, so this sweeper
+	// is what actually bounds how long a leaked one can outlive its lease. Runs
+	// alongside the HTTP server in this same process — no new deployment unit.
+	go seaweedfssweep.Run(ctx, seaweedfssweep.Deps{Leases: leases, Registry: registrySvc})
 
 	if len(cfg.FilesystemRoots) == 0 {
 		log.Print("no filesystem roots configured; the filesystem backend kind is disabled (set BOOTH_STORAGE_FILESYSTEM_ROOTS to enable it)")
@@ -61,9 +70,10 @@ func run() error {
 		Addr: cfg.HTTPAddr,
 		Handler: api.NewRouter(api.Deps{
 			Verifier:                   verifier,
-			Registry:                   registry.NewService(meta, creds, registry.FilesystemPolicy{Roots: cfg.FilesystemRoots}),
+			Registry:                   registrySvc,
 			Grants:                     uploadgrant.NewService(grants),
 			MaxUploadBytes:             cfg.MaxUploadBytes,
+			SeaweedFSLeases:            leases,
 			CredentialBrokerCredential: cfg.CredentialBrokerCredential,
 		}),
 		// Bound how long a client may take to send headers. Deliberately no overall
@@ -90,28 +100,28 @@ func run() error {
 // explicit dev mode. The upload-grant store shares the metadata store's one connection
 // pool and migration runner (registry.PostgresStore.Pool) rather than opening a second
 // pool for one more table.
-func openStores(ctx context.Context, cfg config.Config) (registry.MetadataStore, registry.CredentialStore, uploadgrant.Store, func(), error) {
+func openStores(ctx context.Context, cfg config.Config) (registry.MetadataStore, registry.CredentialStore, uploadgrant.Store, seaweedfslease.Store, func(), error) {
 	if cfg.DevMemory {
 		log.Print("WARNING: BOOTH_STORAGE_DEV_MEMORY=true — backend metadata AND credentials are held only in this process's memory and are lost on restart. Local development only.")
-		return registry.NewMemoryStore(), registry.NewMemoryCredentials(), uploadgrant.NewMemoryStore(), func() {}, nil
+		return registry.NewMemoryStore(), registry.NewMemoryCredentials(), uploadgrant.NewMemoryStore(), seaweedfslease.NewMemoryStore(), func() {}, nil
 	}
 
 	pg, err := registry.NewPostgresStore(ctx, cfg.PostgresDSN)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("opening metadata store: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("opening metadata store: %w", err)
 	}
 
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
 		pg.Close()
-		return nil, nil, nil, nil, fmt.Errorf("loading in-cluster Kubernetes config (credentials are stored as Secrets, ADR 0020): %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("loading in-cluster Kubernetes config (credentials are stored as Secrets, ADR 0020): %w", err)
 	}
 	client, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		pg.Close()
-		return nil, nil, nil, nil, fmt.Errorf("creating Kubernetes client: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("creating Kubernetes client: %w", err)
 	}
 	log.Printf("storing backend credentials as Secrets in namespace %q", cfg.Namespace)
 
-	return pg, registry.NewKubernetesCredentials(client, cfg.Namespace), uploadgrant.NewPostgresStore(pg.Pool()), pg.Close, nil
+	return pg, registry.NewKubernetesCredentials(client, cfg.Namespace), uploadgrant.NewPostgresStore(pg.Pool()), seaweedfslease.NewPostgresStore(pg.Pool()), pg.Close, nil
 }
