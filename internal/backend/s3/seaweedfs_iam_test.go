@@ -209,6 +209,27 @@ func TestMintScopedCredential_SeaweedFSIAM_FullLifecycle(t *testing.T) {
 	}
 }
 
+// "Test connection" (handleAdminTestNew/TestSaved, internal/api/server.go) is just
+// Backend.Check against whatever credentials were given — credentialProvider only
+// changes how MintScopedCredential later mints a *scoped* key, never how this module
+// itself authenticates. So a seaweedfs-iam-configured backend must already pass Check
+// using nothing but the bare admin access key/secret, with no session token at all —
+// confirming that directly here, against the real server.
+func TestCheck_SeaweedFSIAMBackend_AdminKeyOnlyNoSessionToken(t *testing.T) {
+	env := requireSeaweedFS(t)
+	bucket := env.newBucket(t)
+	admin := Credentials{AccessKeyID: env.adminAccess, SecretAccessKey: env.adminSecret} // no SessionToken
+	cfg := Config{Endpoint: env.endpoint, Bucket: bucket, PathStyle: true, CredentialProvider: CredentialProviderSeaweedFSIAM}
+
+	b, err := New(cfg, admin)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := b.Check(context.Background()); err != nil {
+		t.Fatalf("Check (what \"Test connection\" calls) = %v, want success using only the admin key", err)
+	}
+}
+
 func TestMintScopedCredential_SeaweedFSIAM_UndoOnRecordFailure(t *testing.T) {
 	env := requireSeaweedFS(t)
 	bucket := env.newBucket(t)
