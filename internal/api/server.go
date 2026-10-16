@@ -94,6 +94,7 @@ func NewRouter(deps Deps) http.Handler {
 			r.Get("/api/backends/{id}", s.handleGetBackend)
 			r.Get("/api/backends/{id}/objects", s.handleListObjects)
 			r.Get("/api/backends/{id}/objects/*", s.handleReadObject)
+			r.Head("/api/backends/{id}/objects/*", s.handleStatObject)
 		})
 		// PUT .../objects/* does its own authorization inline (ADR 0117 point 8a),
 		// rather than sitting behind auth.Require(CanWrite): editors and owners may
@@ -276,12 +277,47 @@ func objectPath(r *http.Request, id string) string {
 	return strings.TrimPrefix(r.URL.Path, "/api/backends/"+id+"/objects/")
 }
 
+// handleReadObject is GET .../objects/*. With no Range header it serves the whole
+// object (200), same as always. With one it serves exactly that byte range (206) once
+// Stat has confirmed it lies within the object's current size — a plain client never
+// has to know ranging exists, and a Range-aware one (Spark/Hadoop S3A, a browser video
+// scrubber) gets the granular reads it needs without downloading the whole object.
 func (s *server) handleReadObject(w http.ResponseWriter, r *http.Request) {
 	b, ok := s.openBackend(w, r)
 	if !ok {
 		return
 	}
 	path := objectPath(r, chi.URLParam(r, "id"))
+
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader == "" {
+		s.serveWholeObject(w, r, b, path)
+		return
+	}
+
+	// The real size has to be known before a range can be validated or clamped, and
+	// before the Content-Range header's total can be written — Stat first, every time.
+	info, err := b.Stat(r.Context(), path)
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	rg, parsed, unsatisfiable := parseRange(rangeHeader, info.Size)
+	switch {
+	case unsatisfiable:
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", info.Size))
+		auth.WriteError(w, http.StatusRequestedRangeNotSatisfiable, "the requested range lies outside the object's size")
+	case !parsed:
+		// Unparseable, or more than one range: RFC 9110 section 14.2 lets a server
+		// ignore a Range header it doesn't support and answer the whole object instead
+		// of rejecting the request.
+		s.serveWholeObject(w, r, b, path)
+	default:
+		s.serveObjectRange(w, r, b, path, rg, info.Size)
+	}
+}
+
+func (s *server) serveWholeObject(w http.ResponseWriter, r *http.Request, b backend.Backend, path string) {
 	rc, info, err := b.Read(r.Context(), path)
 	if err != nil {
 		writeBackendError(w, err)
@@ -289,28 +325,126 @@ func (s *server) handleReadObject(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
-	// Stored objects are user-supplied content served from this module's origin, so
-	// neutralize anything a browser might try to execute or sniff: force a download,
-	// forbid MIME sniffing, and sandbox any document that does get rendered.
-	h := w.Header()
-	ct := info.ContentType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	h.Set("Content-Type", ct)
-	h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
-	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": lastSegment(info.Path)}))
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	if !info.ModTime.IsZero() {
-		h.Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
-	}
+	setObjectHeaders(w, info)
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.WriteHeader(http.StatusOK)
 	// Headers are sent; a mid-stream failure can only truncate, which the client detects
 	// via Content-Length. Nothing more useful to do than log it.
 	if _, err := io.Copy(w, rc); err != nil {
 		log.Printf("streaming object %q: %v", path, err)
 	}
+}
+
+func (s *server) serveObjectRange(w http.ResponseWriter, r *http.Request, b backend.Backend, path string, rg backend.ByteRange, totalSize int64) {
+	rc, info, err := b.ReadRange(r.Context(), path, rg)
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	defer rc.Close()
+
+	setObjectHeaders(w, info)
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rg.Start, rg.End, totalSize))
+	w.Header().Set("Content-Length", strconv.FormatInt(rg.End-rg.Start+1, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	if _, err := io.Copy(w, rc); err != nil {
+		log.Printf("streaming object %q (range %d-%d): %v", path, rg.Start, rg.End, err)
+	}
+}
+
+// handleStatObject is HEAD .../objects/*: the same metadata and headers as a GET,
+// without the body.
+func (s *server) handleStatObject(w http.ResponseWriter, r *http.Request) {
+	b, ok := s.openBackend(w, r)
+	if !ok {
+		return
+	}
+	path := objectPath(r, chi.URLParam(r, "id"))
+	info, err := b.Stat(r.Context(), path)
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	setObjectHeaders(w, info)
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
+	w.WriteHeader(http.StatusOK)
+}
+
+// setObjectHeaders sets the headers shared by a whole-object GET, a ranged GET and a
+// HEAD. Stored objects are user-supplied content served from this module's origin, so
+// this also neutralizes anything a browser might try to execute or sniff: force a
+// download, forbid MIME sniffing, and sandbox any document that does get rendered.
+func setObjectHeaders(w http.ResponseWriter, info backend.ObjectInfo) {
+	h := w.Header()
+	ct := info.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	h.Set("Content-Type", ct)
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": lastSegment(info.Path)}))
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	h.Set("Accept-Ranges", "bytes")
+	if info.ETag != "" {
+		h.Set("ETag", info.ETag)
+	}
+	if !info.ModTime.IsZero() {
+		h.Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
+	}
+}
+
+// parseRange parses a single-range "Range: bytes=..." request header (RFC 9110 section
+// 14.1.2) against an object of the given size. parsed is false when the header is
+// absent, malformed, or names more than one range (multi-range isn't supported) — the
+// caller falls back to serving the whole object, per section 14.2. unsatisfiable is true
+// when the (successfully parsed) range's start lies at or past size, which the caller
+// must answer 416 for rather than serve anything.
+func parseRange(header string, size int64) (r backend.ByteRange, parsed, unsatisfiable bool) {
+	const prefix = "bytes="
+	spec, ok := strings.CutPrefix(header, prefix)
+	if !ok || strings.Contains(spec, ",") {
+		return backend.ByteRange{}, false, false
+	}
+	dash := strings.IndexByte(spec, '-')
+	if dash < 0 {
+		return backend.ByteRange{}, false, false
+	}
+	startStr, endStr := spec[:dash], spec[dash+1:]
+
+	if startStr == "" {
+		// A suffix range, "bytes=-N": the last N bytes of the object.
+		n, err := strconv.ParseInt(endStr, 10, 64)
+		if err != nil || n <= 0 {
+			return backend.ByteRange{}, false, false
+		}
+		if size == 0 {
+			return backend.ByteRange{}, true, true
+		}
+		start := size - n
+		if start < 0 {
+			start = 0
+		}
+		return backend.ByteRange{Start: start, End: size - 1}, true, false
+	}
+
+	start, err := strconv.ParseInt(startStr, 10, 64)
+	if err != nil || start < 0 {
+		return backend.ByteRange{}, false, false
+	}
+	if start >= size {
+		return backend.ByteRange{}, true, true
+	}
+	end := size - 1
+	if endStr != "" {
+		e, err := strconv.ParseInt(endStr, 10, 64)
+		if err != nil || e < start {
+			return backend.ByteRange{}, false, false
+		}
+		if e < end {
+			end = e
+		}
+	}
+	return backend.ByteRange{Start: start, End: end}, true, false
 }
 
 // handleWriteObject is PUT .../objects/*. It is deliberately not behind
@@ -871,6 +1005,8 @@ func writeBackendError(w http.ResponseWriter, err error) {
 		auth.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, backend.ErrPreconditionFailed):
 		auth.WriteError(w, http.StatusPreconditionFailed, err.Error())
+	case errors.Is(err, backend.ErrInvalidRange):
+		auth.WriteError(w, http.StatusRequestedRangeNotSatisfiable, err.Error())
 	case errors.Is(err, context.Canceled):
 		// The client went away; nothing to report to anyone.
 		w.WriteHeader(499)

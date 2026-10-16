@@ -156,12 +156,46 @@ func (b *Backend) Read(ctx context.Context, p string) (io.ReadCloser, backend.Ob
 	if err != nil {
 		return nil, backend.ObjectInfo{}, describe(err)
 	}
+	// storage.ReaderObjectAttrs carries no Etag field (unlike storage.ObjectAttrs, which
+	// List/Write/Stat use) — the client library doesn't expose one from a read response
+	// without a second, separate Attrs() round trip. So a plain GET against a gcs backend
+	// never carries an ETag header; HEAD (Stat) is unaffected and always does.
 	return r, backend.ObjectInfo{
 		Path:        clean,
 		Size:        r.Attrs.Size,
 		ModTime:     r.Attrs.LastModified.UTC(),
 		ContentType: r.Attrs.ContentType,
 	}, nil
+}
+
+func (b *Backend) ReadRange(ctx context.Context, p string, rg backend.ByteRange) (io.ReadCloser, backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return nil, backend.ObjectInfo{}, err
+	}
+	r, err := b.bucket.Object(b.prefix+clean).NewRangeReader(ctx, rg.Start, rg.End-rg.Start+1)
+	if err != nil {
+		return nil, backend.ObjectInfo{}, describe(err)
+	}
+	// Same gap as Read: no Etag on a ranged reader's attrs either.
+	return r, backend.ObjectInfo{
+		Path:        clean,
+		Size:        r.Attrs.Size,
+		ModTime:     r.Attrs.LastModified.UTC(),
+		ContentType: r.Attrs.ContentType,
+	}, nil
+}
+
+func (b *Backend) Stat(ctx context.Context, p string) (backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return backend.ObjectInfo{}, err
+	}
+	attrs, err := b.bucket.Object(b.prefix + clean).Attrs(ctx)
+	if err != nil {
+		return backend.ObjectInfo{}, describe(err)
+	}
+	return infoFor(clean, attrs), nil
 }
 
 func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend.WriteOptions) (backend.ObjectInfo, error) {
@@ -274,7 +308,7 @@ func (b *Backend) KeyExists(ctx context.Context, key string) (bool, error) {
 }
 
 func infoFor(p string, a *storage.ObjectAttrs) backend.ObjectInfo {
-	return backend.ObjectInfo{Path: p, Size: a.Size, ModTime: a.Updated.UTC(), ContentType: a.ContentType}
+	return backend.ObjectInfo{Path: p, Size: a.Size, ModTime: a.Updated.UTC(), ContentType: a.ContentType, ETag: backend.QuoteETag(a.Etag)}
 }
 
 // describe maps service errors onto the package-independent errors callers branch on,
@@ -298,6 +332,8 @@ func describe(err error) error {
 			return errors.New("bucket does not exist")
 		case http.StatusPreconditionFailed:
 			return backend.ErrPreconditionFailed
+		case http.StatusRequestedRangeNotSatisfiable:
+			return backend.ErrInvalidRange
 		}
 	}
 	return err

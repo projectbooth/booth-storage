@@ -67,6 +67,10 @@ func (m *memFlat) KeyExists(_ context.Context, k string) (bool, error) { return 
 func (m *memFlat) Read(context.Context, string) (io.ReadCloser, ObjectInfo, error) {
 	return nil, ObjectInfo{}, ErrNotFound
 }
+func (m *memFlat) ReadRange(context.Context, string, ByteRange) (io.ReadCloser, ObjectInfo, error) {
+	return nil, ObjectInfo{}, ErrNotFound
+}
+func (m *memFlat) Stat(context.Context, string) (ObjectInfo, error) { return ObjectInfo{}, ErrNotFound }
 func (m *memFlat) Write(context.Context, string, io.Reader, WriteOptions) (ObjectInfo, error) {
 	return ObjectInfo{}, nil
 }
