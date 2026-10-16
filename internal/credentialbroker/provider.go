@@ -35,6 +35,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/backend"
 	"github.com/projectbooth/booth-storage/internal/backend/s3"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
 )
 
 // ProviderPath is the fixed path every credential-broker provider implements
@@ -59,6 +60,11 @@ type Deps struct {
 	// meaningful "unconfigured, so allow" state for a route this privileged.
 	Credential string
 	Registry   *registry.Service
+	// Leases persists every SeaweedFS IAM lease the seaweedfs-iam credential path mints
+	// (ADR 0118 ruling 3) — nil disables that path outright (MintScopedCredential's
+	// seaweedfs-iam branch refuses with ErrScopeNotSupported when it has no recorder to
+	// call, rather than minting an untracked credential).
+	Leases seaweedfslease.Store
 	// Now and NewLeaseID are overridden in tests; both default sensibly when zero.
 	Now        func() time.Time
 	NewLeaseID func() string
@@ -239,9 +245,23 @@ func (p *provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		AccessKeyID: creds[s3.CredAccessKeyID], SecretAccessKey: creds[s3.CredSecretAccessKey], SessionToken: creds[s3.CredSessionToken],
 	}
 
+	leaseID := p.NewLeaseID()
+	echoPath := strings.Trim(scope.Path, "/")
+
 	minted, err := p.Mint(r.Context(), cfg, admin, s3.MintRequest{
 		Path: scope.Path, Access: req.Access, TTL: time.Duration(req.TTLSeconds) * time.Second,
 		AllowSessionToken: opts.SessionToken != "forbidden",
+		RecordLease: func(ctx context.Context, lease s3.SeaweedFSLease) error {
+			if p.Leases == nil {
+				return errors.New("no lease store configured")
+			}
+			return p.Leases.Record(ctx, seaweedfslease.Lease{
+				ID: leaseID, Workspace: req.Requester.Workspace, BackendID: scope.BackendID,
+				IAMUserName: lease.IAMUserName, AccessKeyID: lease.AccessKeyID,
+				Prefix: lease.Prefix, Access: lease.Access,
+				ExpiresAt: lease.ExpiresAt, CreatedAt: lease.CreatedAt,
+			})
+		},
 	})
 	if err != nil {
 		if errors.Is(err, s3.ErrScopeNotSupported) {
@@ -252,9 +272,6 @@ func (p *provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "mint_failed", "the backend could not be reached to mint a credential")
 		return
 	}
-
-	leaseID := p.NewLeaseID()
-	echoPath := strings.Trim(scope.Path, "/")
 	// Audit trail (ADR 0080's own mandatory record, distinct from this module's ordinary
 	// stdout logging, but stdout is what this module has — see contracts/credential-
 	// broker.md's requirements and ADR 0022's "no logging API to integrate against"): who,

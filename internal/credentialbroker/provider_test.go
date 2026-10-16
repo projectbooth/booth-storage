@@ -15,6 +15,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/backend"
 	"github.com/projectbooth/booth-storage/internal/backend/s3"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
 )
 
 const testCredential = "bcbp.storage.test-mac-value"
@@ -296,5 +297,84 @@ func TestProvider_SuccessResponseShapeAndAudit(t *testing.T) {
 	}
 	if strings.Contains(logged, "minted-secret-key") || strings.Contains(logged, "minted-access-key") {
 		t.Fatalf("audit log leaked the minted credential value: %q", logged)
+	}
+}
+
+// The seaweedfs-iam mint path (internal/backend/s3) never knows about lease identity
+// (lease ID, workspace, backend ID) — it calls req.RecordLease with only what it itself
+// produced, and this handler is what fills in the rest before writing to Deps.Leases.
+// This exercises that wiring directly, without a real seaweedfs-iam mint: Mint is faked
+// to just invoke req.RecordLease itself, the same way the real seaweedfs-iam path would.
+func TestProvider_RecordLeaseFillsIdentityAndWritesToLeaseStore(t *testing.T) {
+	reg := newTestRegistry(t)
+	registerS3Backend(t, reg, "acme", "lake", s3.Config{Endpoint: "http://seaweedfs.storage.svc:8333", Bucket: "lake", CredentialProvider: "seaweedfs-iam"},
+		map[string]string{s3.CredAccessKeyID: "admin", s3.CredSecretAccessKey: "adminsecret"})
+
+	leases := seaweedfslease.NewMemoryStore()
+	expiresAt := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	h := NewHandler(Deps{Credential: testCredential, Registry: reg, Leases: leases,
+		Mint: func(ctx context.Context, cfg s3.Config, admin s3.Credentials, req s3.MintRequest) (s3.MintedCredential, error) {
+			if err := req.RecordLease(ctx, s3.SeaweedFSLease{
+				IAMUserName: "booth-abc123", AccessKeyID: "AKIAABC123", Prefix: "ns1/t1", Access: req.Access,
+				ExpiresAt: expiresAt, CreatedAt: expiresAt.Add(-time.Minute),
+			}); err != nil {
+				return s3.MintedCredential{}, err
+			}
+			return s3.MintedCredential{AccessKeyID: "AKIAABC123", SecretAccessKey: "secret", ExpiresAt: expiresAt}, nil
+		}})
+
+	body := map[string]any{
+		"kind": "s3", "access": "read", "ttlSeconds": 120,
+		"scope":     map[string]string{"backendId": "lake", "path": "ns1/t1"},
+		"requester": map[string]string{"subject": "job:7", "workspace": "acme", "role": "owner"},
+	}
+	rec := doRequest(t, h, testCredential, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body)
+	}
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var leaseID string
+	if err := json.Unmarshal(resp["leaseId"], &leaseID); err != nil || leaseID == "" {
+		t.Fatalf("response leaseId = %q, %v", resp["leaseId"], err)
+	}
+
+	pending, err := leases.PendingSweep(context.Background(), expiresAt.Add(time.Hour), 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("PendingSweep = %+v, %v; want the one recorded lease", pending, err)
+	}
+	got := pending[0]
+	if got.ID != leaseID {
+		t.Errorf("recorded lease ID = %q, want the response's own leaseId %q", got.ID, leaseID)
+	}
+	if got.Workspace != "acme" || got.BackendID != "lake" || got.IAMUserName != "booth-abc123" ||
+		got.AccessKeyID != "AKIAABC123" || got.Prefix != "ns1/t1" || got.Access != "read" || !got.ExpiresAt.Equal(expiresAt) {
+		t.Errorf("recorded lease = %+v, want identity filled in from the request plus the mint path's own fields", got)
+	}
+}
+
+// If no lease store is configured, the handler's RecordLease closure must itself refuse
+// rather than silently succeed — mirrored by internal/backend/s3's own check that a nil
+// RecordLease refuses before ever touching the network, but this is the handler's half
+// of that contract: Deps.Leases == nil must still produce a real error when called.
+func TestProvider_RecordLeaseWithoutLeaseStoreConfiguredFails(t *testing.T) {
+	reg := newTestRegistry(t)
+	registerS3Backend(t, reg, "acme", "lake", s3.Config{Endpoint: "http://seaweedfs.storage.svc:8333", Bucket: "lake", CredentialProvider: "seaweedfs-iam"},
+		map[string]string{s3.CredAccessKeyID: "admin", s3.CredSecretAccessKey: "adminsecret"})
+
+	h := NewHandler(Deps{Credential: testCredential, Registry: reg, // Leases left nil
+		Mint: func(ctx context.Context, cfg s3.Config, admin s3.Credentials, req s3.MintRequest) (s3.MintedCredential, error) {
+			return s3.MintedCredential{}, req.RecordLease(ctx, s3.SeaweedFSLease{IAMUserName: "booth-x", AccessKeyID: "AKIAX"})
+		}})
+	body := map[string]any{
+		"kind": "s3", "access": "read", "ttlSeconds": 120,
+		"scope":     map[string]string{"backendId": "lake", "path": "ns1/t1"},
+		"requester": map[string]string{"subject": "job:7", "workspace": "acme", "role": "owner"},
+	}
+	rec := doRequest(t, h, testCredential, body)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (body %s)", rec.Code, rec.Body)
 	}
 }

@@ -32,7 +32,18 @@ type Config struct {
 	// PathStyle forces path-style addressing (http://host/bucket/key). MinIO and most
 	// self-hosted stores need it; AWS works with either.
 	PathStyle bool `json:"pathStyle,omitempty"`
+	// CredentialProvider selects how MintScopedCredential derives a scoped credential
+	// for this backend (ADR 0118). "" or "minio-admin" (default, unchanged): MinIO's
+	// admin API (AddServiceAccount). "seaweedfs-iam": an ephemeral IAM user + attached
+	// prefix policy + bare access key, minted via SeaweedFS's embedded IAM API. Anything
+	// else is a Validate error, not a silent fallback to the default.
+	CredentialProvider string `json:"credentialProvider,omitempty"`
 }
+
+const (
+	CredentialProviderMinIOAdmin   = "minio-admin"
+	CredentialProviderSeaweedFSIAM = "seaweedfs-iam"
+)
 
 // Credentials are the s3 kind's secret fields, delivered from a Kubernetes Secret
 // (ADR 0020). Both empty means anonymous access.
@@ -59,6 +70,11 @@ func (c Config) Validate() error {
 	}
 	if _, err := backend.CleanPrefix(c.Prefix); err != nil {
 		return fmt.Errorf("prefix: %w", err)
+	}
+	switch c.CredentialProvider {
+	case "", CredentialProviderMinIOAdmin, CredentialProviderSeaweedFSIAM:
+	default:
+		return fmt.Errorf("credentialProvider %q is not recognized", c.CredentialProvider)
 	}
 	return nil
 }

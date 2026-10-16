@@ -1,9 +1,10 @@
 name: CI
 
 # Layers 1-2 (contracts/testing-strategy.md, ADR 0024): unit + contract tests. No cluster
-# needed — but the backend tests DO run against real MinIO, Azurite and PostgreSQL
-# containers (hack/docker-compose.emulators.yml, the same file used locally), because the
-# S3/Azure/Postgres code paths are only meaningfully exercised against the real thing.
+# needed — but the backend tests DO run against real MinIO, Azurite, PostgreSQL and
+# SeaweedFS containers (hack/docker-compose.emulators.yml, the same file used locally),
+# because the S3/Azure/Postgres/seaweedfs-iam code paths are only meaningfully exercised
+# against the real thing.
 # Runs on every push and PR; branch protection on main requires every job here to pass
 # before merge.
 on:
@@ -46,8 +47,14 @@ jobs:
       - name: go build
         run: go build ./...
 
-      - name: Start MinIO, Azurite and PostgreSQL
+      - name: Start MinIO, Azurite, PostgreSQL and SeaweedFS
         run: docker compose -f hack/docker-compose.emulators.yml up -d --wait
+
+      - name: Seed SeaweedFS's admin IAM identity
+        # SeaweedFS boots with zero IAM identities (no healthcheck exists for this image
+        # — see hack/docker-compose.emulators.yml's own comment — so this script polls
+        # the S3 port itself before seeding).
+        run: sh hack/seaweedfs-seed-admin.sh
 
       - name: Unit + contract tests
         env:

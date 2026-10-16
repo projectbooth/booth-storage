@@ -35,6 +35,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/backend"
 	"github.com/projectbooth/booth-storage/internal/credentialbroker"
 	"github.com/projectbooth/booth-storage/internal/registry"
+	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
 	"github.com/projectbooth/booth-storage/internal/uploadgrant"
 )
 
@@ -53,6 +54,9 @@ type Deps struct {
 	Grants *uploadgrant.Service
 	// MaxUploadBytes caps one object write; 0 means unlimited.
 	MaxUploadBytes int64
+	// SeaweedFSLeases persists every SeaweedFS IAM lease the seaweedfs-iam credential
+	// path mints (ADR 0118 ruling 3) — see internal/credentialbroker.Deps.Leases.
+	SeaweedFSLeases seaweedfslease.Store
 	// CredentialBrokerCredential is this module's copy of the shared secret core presents
 	// to the ADR 0080 credential-broker provider route (POST /internal/credentials, see
 	// internal/credentialbroker) — the route is always mounted, but empty means every call
@@ -81,6 +85,7 @@ func NewRouter(deps Deps) http.Handler {
 	r.Post(credentialbroker.ProviderPath, credentialbroker.NewHandler(credentialbroker.Deps{
 		Credential: deps.CredentialBrokerCredential,
 		Registry:   deps.Registry,
+		Leases:     deps.SeaweedFSLeases,
 	}).ServeHTTP)
 
 	r.Group(func(r chi.Router) {
