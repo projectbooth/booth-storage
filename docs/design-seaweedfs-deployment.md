@@ -66,6 +66,26 @@ homelab, instead of needing a separate backup strategy for an embedded on-disk s
 recommendation, not a verified-working configuration - it wasn't exercised in either spike, both of
 which used the embedded default for speed.
 
+## Volume sizing
+
+The gate-4 spike (`docs/design-seaweedfs-gate4.md`, branch `design-seaweedfs-gate4`, commit
+`6db2104`) directly confirmed a concern the coordinator flagged for the planned 50GB initial
+volume: SeaweedFS's default `-master.volumeSizeLimitMB` is `30720` (30GB), and on a disk this
+small relative to that default, the volume-growth algorithm refuses to allocate new volumes once it
+judges there isn't enough free-space headroom left - observed directly as `No writable volumes and
+no free volumes left`, reproducibly, well before the disk is actually full. This is **not** a
+`-volume.max` slot-count problem (that flag defaults to a fixed `8`, not auto-scaled by disk size) -
+it's the per-volume size assumption itself that needs to shrink to match a small disk.
+
+**Recommended setting: `-master.volumeSizeLimitMB=1024`** (1GB) for this deployment's 50GB volume.
+The gate-4 spike confirmed, at a smaller scale (a 20MB test disk), that lowering this flag measurably
+increases how much of the real disk is usable as volume slots before the same failure mode is hit
+(two real volumes successfully allocated at a 10:1 disk-to-limit ratio, versus zero at the default
+30720MB limit on the same disk) - the exact 50GB-scale numbers weren't re-measured, but the
+mechanism and the direction of the fix are now directly confirmed, not just inferred from
+documentation. Set this flag on the master (or on `weed server` if master and volume roles are
+combined); re-check it if the volume's provisioned size changes.
+
 ## Version pin
 
 Both spikes ran `chrislusf/seaweedfs:latest`, which resolved to **build `30GB 4.48` (`530be3e37`)**
@@ -162,9 +182,12 @@ observed changing behavior on (not a general SeaweedFS changelog review):
 
 ## What I could not verify
 
-- SeaweedFS's filer-backed-by-Postgres configuration (the recommendation in the persistence
-  section) - general SeaweedFS documentation knowledge, not exercised in either spike, both of
-  which used the embedded default store for speed.
+- ~~SeaweedFS's filer-backed-by-Postgres configuration~~ - now exercised directly: the gate-4
+  spike (`docs/design-seaweedfs-gate4.md`) got `[postgres2]` working (confirmed via `weed scaffold
+  -config=filer` on the pinned image), and both a restart and a `4.47`->`4.48` upgrade preserved
+  IAM state against it. Still open: the Postgres-filer collation warning gate 4 observed
+  (`filemeta.name collation "en_US.utf8" is not byte-ordered`, falls back to a slower `COLLATE
+  "C"` sort) - a potential effect on S3 listing order for Lakekeeper/Spark, not investigated.
 - Any real multi-node SeaweedFS deployment (separate master/volume/filer processes, replication
   across volume servers) - both spikes ran a single `weed server` process with every role
   combined, which is adequate for proving the S3/IAM mechanisms work but says nothing about
