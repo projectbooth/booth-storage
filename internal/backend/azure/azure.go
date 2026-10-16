@@ -229,7 +229,64 @@ func (b *Backend) Read(ctx context.Context, p string) (io.ReadCloser, backend.Ob
 	if err != nil {
 		return nil, backend.ObjectInfo{}, describe(err)
 	}
+	return resp.Body, infoFromDownload(clean, resp), nil
+}
+
+func (b *Backend) ReadRange(ctx context.Context, p string, rg backend.ByteRange) (io.ReadCloser, backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return nil, backend.ObjectInfo{}, err
+	}
+	wantLen := rg.End - rg.Start + 1
+	resp, err := b.container.NewBlobClient(b.prefix+clean).DownloadStream(ctx, &blob.DownloadStreamOptions{
+		Range: blob.HTTPRange{Offset: rg.Start, Count: wantLen},
+	})
+	if err != nil {
+		return nil, backend.ObjectInfo{}, describe(err)
+	}
+	// Azure (confirmed against Azurite) does not error a range starting at or past the
+	// blob's end: it answers 200/206 with fewer bytes than asked for instead of 416. The
+	// HTTP layer already resolves and clamps a real request's range against Stat before
+	// ever calling this, so this only matters for the backstop case (the blob shrank in
+	// the gap) — but a silent short read there would otherwise go out with a
+	// Content-Length header that lies about what's actually in the body.
+	if resp.ContentLength == nil || *resp.ContentLength != wantLen {
+		resp.Body.Close()
+		return nil, backend.ObjectInfo{}, backend.ErrInvalidRange
+	}
+	return resp.Body, infoFromDownload(clean, resp), nil
+}
+
+func (b *Backend) Stat(ctx context.Context, p string) (backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return backend.ObjectInfo{}, err
+	}
+	props, err := b.container.NewBlobClient(b.prefix+clean).GetProperties(ctx, nil)
+	if err != nil {
+		return backend.ObjectInfo{}, describe(err)
+	}
 	info := backend.ObjectInfo{Path: clean}
+	if props.ContentLength != nil {
+		info.Size = *props.ContentLength
+	}
+	if props.LastModified != nil {
+		info.ModTime = props.LastModified.UTC()
+	}
+	if props.ContentType != nil {
+		info.ContentType = *props.ContentType
+	}
+	if props.ETag != nil {
+		info.ETag = backend.QuoteETag(string(*props.ETag))
+	}
+	return info, nil
+}
+
+// infoFromDownload builds an ObjectInfo from a DownloadStream response, shared by the
+// whole-object and ranged reads: both report the same (full-object) ETag and
+// Last-Modified, and whatever Content-Length the service actually sent for that request.
+func infoFromDownload(path string, resp blob.DownloadStreamResponse) backend.ObjectInfo {
+	info := backend.ObjectInfo{Path: path}
 	if resp.ContentLength != nil {
 		info.Size = *resp.ContentLength
 	}
@@ -239,7 +296,10 @@ func (b *Backend) Read(ctx context.Context, p string) (io.ReadCloser, backend.Ob
 	if resp.ContentType != nil {
 		info.ContentType = *resp.ContentType
 	}
-	return resp.Body, info, nil
+	if resp.ETag != nil {
+		info.ETag = backend.QuoteETag(string(*resp.ETag))
+	}
+	return info
 }
 
 func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend.WriteOptions) (backend.ObjectInfo, error) {
@@ -399,6 +459,8 @@ func describe(err error) error {
 		// Azure answers a failed create-only commit with either code depending on the
 		// operation; both mean the same thing here: the blob already exists.
 		return backend.ErrPreconditionFailed
+	case bloberror.HasCode(err, bloberror.InvalidRange):
+		return backend.ErrInvalidRange
 	}
 	return err
 }

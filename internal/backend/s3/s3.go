@@ -181,7 +181,42 @@ func (b *Backend) Read(ctx context.Context, p string) (io.ReadCloser, backend.Ob
 		obj.Close()
 		return nil, backend.ObjectInfo{}, describe(err)
 	}
-	return obj, backend.ObjectInfo{Path: clean, Size: st.Size, ModTime: st.LastModified.UTC(), ContentType: st.ContentType}, nil
+	return obj, backend.ObjectInfo{Path: clean, Size: st.Size, ModTime: st.LastModified.UTC(), ContentType: st.ContentType, ETag: backend.QuoteETag(st.ETag)}, nil
+}
+
+func (b *Backend) ReadRange(ctx context.Context, p string, rg backend.ByteRange) (io.ReadCloser, backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return nil, backend.ObjectInfo{}, err
+	}
+	getOpts := minio.GetObjectOptions{}
+	if err := getOpts.SetRange(rg.Start, rg.End); err != nil {
+		return nil, backend.ObjectInfo{}, fmt.Errorf("%w: %v", backend.ErrInvalidRange, err)
+	}
+	obj, err := b.client.GetObject(ctx, b.bucket, b.prefix+clean, getOpts)
+	if err != nil {
+		return nil, backend.ObjectInfo{}, describe(err)
+	}
+	// Forces the request, same as Read — a missing object or an out-of-bounds range (the
+	// object shrank since the caller resolved rg against Stat) surfaces here.
+	st, err := obj.Stat()
+	if err != nil {
+		obj.Close()
+		return nil, backend.ObjectInfo{}, describe(err)
+	}
+	return obj, backend.ObjectInfo{Path: clean, Size: st.Size, ModTime: st.LastModified.UTC(), ContentType: st.ContentType, ETag: backend.QuoteETag(st.ETag)}, nil
+}
+
+func (b *Backend) Stat(ctx context.Context, p string) (backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return backend.ObjectInfo{}, err
+	}
+	st, err := b.client.StatObject(ctx, b.bucket, b.prefix+clean, minio.StatObjectOptions{})
+	if err != nil {
+		return backend.ObjectInfo{}, describe(err)
+	}
+	return backend.ObjectInfo{Path: clean, Size: st.Size, ModTime: st.LastModified.UTC(), ContentType: st.ContentType, ETag: backend.QuoteETag(st.ETag)}, nil
 }
 
 func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend.WriteOptions) (backend.ObjectInfo, error) {
@@ -319,6 +354,8 @@ func describe(err error) error {
 			return fmt.Errorf("access denied by the storage service (%s) — check the credentials and bucket permissions", resp.Code)
 		case minio.PreconditionFailed:
 			return backend.ErrPreconditionFailed
+		case minio.InvalidRange:
+			return backend.ErrInvalidRange
 		}
 	}
 	return err

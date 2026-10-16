@@ -52,6 +52,11 @@ var (
 	// at the path (ADR 0117 point 8/8a). Distinct from ErrConflict (move/folder clobber):
 	// a caller branches on this one to answer 412, not 409.
 	ErrPreconditionFailed = errors.New("object already exists (create-only write)")
+	// ErrInvalidRange means a ReadRange's range does not lie within the object's current
+	// size. The HTTP layer resolves and clamps a Range request against Stat's reported
+	// size before ever calling ReadRange, so this is a backend's own backstop — only
+	// reachable if the object's size changed in the gap between the two calls.
+	ErrInvalidRange = errors.New("requested range not satisfiable")
 )
 
 // ObjectInfo describes one entry returned by List/Read/Write. Path is always relative
@@ -62,9 +67,34 @@ type ObjectInfo struct {
 	Size        int64     `json:"size"`
 	ModTime     time.Time `json:"modTime,omitzero"`
 	ContentType string    `json:"contentType,omitempty"`
+	// ETag is the storage kind's own entity tag for the object's current content,
+	// already formatted as an HTTP ETag header value (double-quoted; "W/"-prefixed when
+	// a kind can only approximate one from metadata rather than real content — see
+	// QuoteETag and each kind's own Read/Stat). Empty when a kind has no cheap way to
+	// report one without an extra round trip (gcs's Read: see its own comment).
+	ETag string `json:"etag,omitempty"`
 	// IsDir marks a "directory" entry from a non-recursive listing: a key prefix on
 	// object stores, a real directory on the filesystem. Path ends in "/" when set.
 	IsDir bool `json:"isDir,omitempty"`
+}
+
+// QuoteETag formats a storage kind's native ETag token as an HTTP ETag header value: a
+// quoted validator per RFC 9110 section 8.8.1. Idempotent — a token that already carries
+// its own quotes (as Azure's does) comes back unchanged. Empty input returns "".
+func QuoteETag(raw string) string {
+	raw = strings.Trim(raw, `"`)
+	if raw == "" {
+		return ""
+	}
+	return `"` + raw + `"`
+}
+
+// ByteRange is one inclusive byte range of an object, for ReadRange's ranged GET (HTTP
+// 206). End is always >= Start. Callers resolve and clamp a range against the object's
+// real size (via Stat) before calling ReadRange — a backend never has to guess.
+type ByteRange struct {
+	Start int64
+	End   int64 // inclusive
 }
 
 // ListOptions controls a List call.
@@ -134,6 +164,19 @@ type Backend interface {
 	// Read opens the object at path. The caller must Close the returned reader. A
 	// missing object yields ErrNotFound.
 	Read(ctx context.Context, path string) (io.ReadCloser, ObjectInfo, error)
+
+	// ReadRange opens one inclusive byte range of the object at path, for a 206 Partial
+	// Content response (Spark/Hadoop S3A-style clients rely on granular ranged reads for
+	// columnar predicate pushdown). The caller must Close the returned reader. A missing
+	// object yields ErrNotFound; a range outside the object's current size yields
+	// ErrInvalidRange (ordinarily never reached — see ErrInvalidRange's own comment).
+	ReadRange(ctx context.Context, path string, r ByteRange) (io.ReadCloser, ObjectInfo, error)
+
+	// Stat returns one object's metadata without opening its content — the no-body
+	// counterpart to Read, for a HEAD request and for resolving a ranged GET's
+	// Content-Range against the object's real size before touching the body. A missing
+	// object yields ErrNotFound.
+	Stat(ctx context.Context, path string) (ObjectInfo, error)
 
 	// Write stores r's bytes at path, replacing any existing object (unless
 	// opts.CreateOnly, see WriteOptions), and returns the stored object's info. A failed

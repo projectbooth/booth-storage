@@ -118,6 +118,72 @@ func (b *Backend) Read(ctx context.Context, p string) (io.ReadCloser, backend.Ob
 	return f, infoFor(clean, st), nil
 }
 
+func (b *Backend) ReadRange(ctx context.Context, p string, rg backend.ByteRange) (io.ReadCloser, backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return nil, backend.ObjectInfo{}, err
+	}
+	root, err := b.openRoot()
+	if err != nil {
+		return nil, backend.ObjectInfo{}, err
+	}
+	defer root.Close()
+
+	f, err := root.Open(filepath.FromSlash(clean))
+	if err != nil {
+		return nil, backend.ObjectInfo{}, mapErr(err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, backend.ObjectInfo{}, mapErr(err)
+	}
+	if !st.Mode().IsRegular() {
+		f.Close()
+		return nil, backend.ObjectInfo{}, backend.ErrNotFound
+	}
+	if rg.Start < 0 || rg.End < rg.Start || rg.Start >= st.Size() || rg.End >= st.Size() {
+		f.Close()
+		return nil, backend.ObjectInfo{}, backend.ErrInvalidRange
+	}
+	if _, err := f.Seek(rg.Start, io.SeekStart); err != nil {
+		f.Close()
+		return nil, backend.ObjectInfo{}, fmt.Errorf("seeking to range: %w", err)
+	}
+	return &rangeReadCloser{f: f, r: io.LimitReader(f, rg.End-rg.Start+1)}, infoFor(clean, st), nil
+}
+
+func (b *Backend) Stat(ctx context.Context, p string) (backend.ObjectInfo, error) {
+	clean, err := backend.CleanPath(p)
+	if err != nil {
+		return backend.ObjectInfo{}, err
+	}
+	root, err := b.openRoot()
+	if err != nil {
+		return backend.ObjectInfo{}, err
+	}
+	defer root.Close()
+
+	st, err := root.Stat(filepath.FromSlash(clean))
+	if err != nil {
+		return backend.ObjectInfo{}, mapErr(err)
+	}
+	if !st.Mode().IsRegular() {
+		return backend.ObjectInfo{}, backend.ErrNotFound
+	}
+	return infoFor(clean, st), nil
+}
+
+// rangeReadCloser limits a ranged read to the requested span while still closing the
+// real, full-file handle underneath it.
+type rangeReadCloser struct {
+	f *os.File
+	r io.Reader
+}
+
+func (rc *rangeReadCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
+func (rc *rangeReadCloser) Close() error               { return rc.f.Close() }
+
 func (b *Backend) Write(ctx context.Context, p string, r io.Reader, opts backend.WriteOptions) (backend.ObjectInfo, error) {
 	clean, err := backend.CleanPath(p)
 	if err != nil {
@@ -552,6 +618,11 @@ func infoFor(p string, st fs.FileInfo) backend.ObjectInfo {
 		Size:        st.Size(),
 		ModTime:     st.ModTime().UTC(),
 		ContentType: mime.TypeByExtension(path.Ext(p)),
+		// The filesystem has no native content hash, so this is a weak validator (the
+		// "W/" prefix, RFC 9110 section 8.8.1): it changes whenever the file is rewritten
+		// (mtime or size differs), but two different byte-for-byte-equal files written at
+		// different times still get different tags, unlike a real content hash.
+		ETag: fmt.Sprintf(`W/"%x-%x"`, st.ModTime().UnixNano(), st.Size()),
 	}
 }
 
