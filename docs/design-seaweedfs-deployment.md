@@ -75,11 +75,13 @@ repo's own test tooling has already learned not to trust: `hack/docker-compose.e
 pins its MinIO test image **by digest**, not tag, with an explicit comment explaining why
 (`ADR 0087/0091`, and item 67's own finding that MinIO's tags and even specific digests can
 disappear from a registry entirely). The same discipline applies here, more urgently, since
-this note is proposing a production homelab component, not a test fixture: **resolve
-`chrislusf/seaweedfs:latest` to its current digest and pin that exact digest** (or `v4.48` if
-SeaweedFS publishes an immutable version tag matching the build string both spikes observed -
-not independently confirmed this pass whether `chrislusf/seaweedfs` publishes immutable
-per-version tags the way `ghcr.io/projectbooth/minio-test` does), the same way
+this note is proposing a production homelab component, not a test fixture: **pin
+`chrislusf/seaweedfs@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d`** -
+the exact digest both spikes actually ran, confirmed directly: `chrislusf/seaweedfs:4.48` and
+`:latest` resolved to this identical image ID at the time this note was written, so the registry
+does publish an immutable-looking per-version tag today, but pin the digest anyway, not the tag -
+a tag can be moved to point at a different image later even if it hasn't been yet (the same thing
+`ADR 0087/0091` already learned the hard way about MinIO's tags), the same way
 `MINIO_TEST_IMAGE`'s default value is pinned, so a later `docker pull` of "the same tag" can't
 silently change what's actually running underneath an already-validated deployment.
 
@@ -169,5 +171,3 @@ observed changing behavior on (not a general SeaweedFS changelog review):
   production-scale topology, replication behavior, or failover.
 - Actual backup/restore of SeaweedFS's own data (filer metadata or volume bytes) - never
   attempted; this note only maps what would need it.
-- Whether `chrislusf/seaweedfs` publishes immutable per-version tags (vs. only a moving `:latest`)
-  - not checked against the image registry directly this pass.
