@@ -134,9 +134,19 @@ func (cfg Config) MintScopedCredential(ctx context.Context, admin Credentials, r
 		if cfg.Endpoint == "" {
 			return MintedCredential{}, fmt.Errorf("%w: seaweedfs-iam requires a configured endpoint", ErrScopeNotSupported)
 		}
-		if req.AllowSessionToken {
-			return MintedCredential{}, fmt.Errorf("%w: the seaweedfs-iam path only ever issues a bare access-key/secret-key pair, never a session token", ErrScopeNotSupported)
-		}
+		// AllowSessionToken=true means "fine if the credential naturally has one; it does
+		// not require one to be present" (see its own doc comment) — the same thing the
+		// MinIO path below reads it as. mintSeaweedFSIAM always returns a bare pair (there
+		// is no session-token-bearing SeaweedFS IAM credential shape), which already
+		// satisfies that: a bare key is a valid answer to "a session token is allowed."
+		// A real bug (found by booth-spark, 2026-10-16) used to refuse here whenever
+		// AllowSessionToken was true — which is every caller except Lakekeeper's bare-pair
+		// warehouse credential (AllowSessionToken=false): Spark's planner sends
+		// options.sessionToken "allowed", and the credential sidecars send no options at
+		// all (also "allowed", the more permissive default) — see
+		// internal/credentialbroker's AllowSessionToken derivation. Only a request that
+		// requires a session token (a shape this backend has no way to produce) would
+		// actually need refusing, and the broker contract has no such value today.
 		return cfg.mintSeaweedFSIAM(ctx, admin, req, keyPrefix)
 	}
 
