@@ -3,6 +3,7 @@ package s3
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -41,14 +42,28 @@ func TestMintScopedCredential_SeaweedFSRequiresEndpoint(t *testing.T) {
 	}
 }
 
-func TestMintScopedCredential_SeaweedFSSessionTokenRefused(t *testing.T) {
-	cfg := Config{Endpoint: "http://seaweedfs.storage.svc:8333", Bucket: "lake", CredentialProvider: CredentialProviderSeaweedFSIAM}
+// Regression (booth-spark, 2026-10-16): AllowSessionToken=true used to be refused
+// outright on the seaweedfs-iam path — but "allowed" means "fine if the credential
+// naturally has one, not required" (see MintRequest.AllowSessionToken's own doc
+// comment), the same way the MinIO path reads it; a bare key already satisfies that.
+// Spark's planner sends options.sessionToken "allowed", and the credential sidecars
+// send no options at all (also "allowed", the more permissive default) — both were
+// broken by the old refusal. This must NOT come back as ErrScopeNotSupported: proven
+// here by pointing at an address nothing listens on, so a mint that actually proceeds
+// fails with a network-level error instead — a different failure than the old
+// short-circuit, and proof the request got past the AllowSessionToken gate at all.
+func TestMintScopedCredential_SeaweedFSAllowSessionTokenIsNotRefused(t *testing.T) {
+	cfg := Config{Endpoint: "http://127.0.0.1:1", Bucket: "lake", CredentialProvider: CredentialProviderSeaweedFSIAM}
 	admin := Credentials{AccessKeyID: "admin", SecretAccessKey: "adminsecret"}
 	_, err := cfg.MintScopedCredential(context.Background(), admin, MintRequest{
 		Path: "t1", Access: AccessRead, TTL: time.Minute, AllowSessionToken: true,
+		RecordLease: func(context.Context, SeaweedFSLease) error { return nil },
 	})
-	if !errors.Is(err, ErrScopeNotSupported) {
-		t.Fatalf("err = %v, want ErrScopeNotSupported (seaweedfs-iam never issues a session token)", err)
+	if err == nil {
+		t.Fatal("expected a network-level failure against an unreachable endpoint, got nil")
+	}
+	if errors.Is(err, ErrScopeNotSupported) {
+		t.Fatalf("err = %v, want a network failure, not ErrScopeNotSupported — AllowSessionToken=true must not be refused on this path", err)
 	}
 }
 
@@ -227,6 +242,38 @@ func TestCheck_SeaweedFSIAMBackend_AdminKeyOnlyNoSessionToken(t *testing.T) {
 	}
 	if err := b.Check(context.Background()); err != nil {
 		t.Fatalf("Check (what \"Test connection\" calls) = %v, want success using only the admin key", err)
+	}
+}
+
+// Real-server confirmation of the fix, for each session-token mode a real caller
+// actually sends (booth-spark's planner: "allowed"; the credential sidecars: no options
+// at all, i.e. also "allowed"; Lakekeeper: "forbidden" — see
+// internal/credentialbroker's provider_test.go for the same three shapes exercised
+// through the broker handler itself, not just this backend).
+func TestMintScopedCredential_SeaweedFSIAM_AllowSessionTokenMintsBareKey(t *testing.T) {
+	env := requireSeaweedFS(t)
+	for _, allow := range []bool{true, false} {
+		t.Run(fmt.Sprintf("AllowSessionToken=%v", allow), func(t *testing.T) {
+			bucket := env.newBucket(t)
+			admin := Credentials{AccessKeyID: env.adminAccess, SecretAccessKey: env.adminSecret}
+			cfg := Config{Endpoint: env.endpoint, Bucket: bucket, PathStyle: true, CredentialProvider: CredentialProviderSeaweedFSIAM}
+
+			var recorded SeaweedFSLease
+			minted, err := cfg.MintScopedCredential(context.Background(), admin, MintRequest{
+				Path: "t1", Access: AccessRead, TTL: time.Minute, AllowSessionToken: allow,
+				RecordLease: func(_ context.Context, lease SeaweedFSLease) error { recorded = lease; return nil },
+			})
+			if err != nil {
+				t.Fatalf("MintScopedCredential(AllowSessionToken=%v) = %v, want success", allow, err)
+			}
+			if minted.AccessKeyID == "" || minted.SecretAccessKey == "" {
+				t.Fatalf("minted = %+v, want a real bare key", minted)
+			}
+			if minted.SessionToken != "" {
+				t.Errorf("SessionToken = %q, want none — seaweedfs-iam never issues one, allowed or not", minted.SessionToken)
+			}
+			_ = DeleteSeaweedFSIAMLease(context.Background(), cfg, admin, recorded.IAMUserName, recorded.AccessKeyID)
+		})
 	}
 }
 

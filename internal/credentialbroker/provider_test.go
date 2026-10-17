@@ -8,9 +8,14 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/projectbooth/booth-storage/internal/backend"
 	"github.com/projectbooth/booth-storage/internal/backend/s3"
@@ -377,4 +382,140 @@ func TestProvider_RecordLeaseWithoutLeaseStoreConfiguredFails(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (body %s)", rec.Code, rec.Body)
 	}
+}
+
+// ---- real SeaweedFS, exact request shapes of the three real callers ------------------
+//
+// Regression (booth-spark, 2026-10-16): a request shaped like Spark's planner
+// (options.sessionToken "allowed") or the credential sidecars (no options at all) was
+// refused by the seaweedfs-iam path's old AllowSessionToken gate — a bug gate 1 missed
+// because it fetched its key straight from SeaweedFS, never through this broker. These
+// tests send the three callers' exact wire shapes through the broker *handler* itself
+// (Deps.Mint left nil, so the real s3.Config.MintScopedCredential runs, not a fake),
+// against a real SeaweedFS server — the level the bug actually lived at, not just the
+// provider's own unit tests (see internal/backend/s3/seaweedfs_iam_test.go for those).
+// Needs BOOTH_TEST_SEAWEEDFS_ENDPOINT/BOOTH_TEST_SEAWEEDFS_ADMIN_ACCESS_KEY/
+// BOOTH_TEST_SEAWEEDFS_ADMIN_SECRET_KEY (see hack/docker-compose.emulators.yml) and is
+// skipped, not faked, without them.
+
+type seaweedfsEnv struct {
+	endpoint, adminAccess, adminSecret string
+}
+
+func requireSeaweedFS(t *testing.T) seaweedfsEnv {
+	t.Helper()
+	env := seaweedfsEnv{
+		endpoint:    os.Getenv("BOOTH_TEST_SEAWEEDFS_ENDPOINT"),
+		adminAccess: os.Getenv("BOOTH_TEST_SEAWEEDFS_ADMIN_ACCESS_KEY"),
+		adminSecret: os.Getenv("BOOTH_TEST_SEAWEEDFS_ADMIN_SECRET_KEY"),
+	}
+	if env.endpoint == "" {
+		if os.Getenv("BOOTH_TEST_REQUIRE_EMULATORS") == "1" {
+			t.Fatal("BOOTH_TEST_REQUIRE_EMULATORS=1 but BOOTH_TEST_SEAWEEDFS_ENDPOINT is not set")
+		}
+		t.Skip("BOOTH_TEST_SEAWEEDFS_ENDPOINT not set; skipping SeaweedFS IAM tests (see hack/docker-compose.emulators.yml)")
+	}
+	return env
+}
+
+var seaweedfsBucketSeq int64
+
+// newBucket creates a fresh bucket with the admin key — this package has no reason to
+// construct a full s3.Backend, so it talks to the real server directly with minio-go,
+// the same client the production s3 kind itself uses.
+func (e seaweedfsEnv) newBucket(t *testing.T) string {
+	t.Helper()
+	seaweedfsBucketSeq++
+	name := "broker-test-" + time.Now().Format("150405") + "-" + strconv.FormatInt(seaweedfsBucketSeq, 36)
+	c, err := minio.New(strings.TrimPrefix(e.endpoint, "http://"), &minio.Options{
+		Creds: credentials.NewStaticV4(e.adminAccess, e.adminSecret, ""), BucketLookup: minio.BucketLookupPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.MakeBucket(context.Background(), name, minio.MakeBucketOptions{}); err != nil {
+		t.Fatalf("creating test bucket: %v", err)
+	}
+	t.Cleanup(func() { _ = c.RemoveBucket(context.Background(), name) })
+	return name
+}
+
+// seaweedfsRequestBody builds one real caller's exact wire shape. opts is nil for the
+// credential sidecars (which send no options field at all); non-nil carries a literal
+// options.sessionToken value for Spark's planner ("allowed") or Lakekeeper
+// ("forbidden").
+func seaweedfsRequestBody(backendID string, opts map[string]string) map[string]any {
+	b := map[string]any{
+		"kind": "s3", "access": "readwrite", "ttlSeconds": 300,
+		"scope":     map[string]string{"backendId": backendID, "path": "t1"},
+		"requester": map[string]string{"subject": "job:1", "workspace": "acme", "role": "editor"},
+	}
+	if opts != nil {
+		b["options"] = opts
+	}
+	return b
+}
+
+func newSeaweedFSProviderHandler(t *testing.T, env seaweedfsEnv, backendID, bucket string) http.Handler {
+	t.Helper()
+	reg := newTestRegistry(t)
+	registerS3Backend(t, reg, "acme", backendID,
+		s3.Config{Endpoint: env.endpoint, Bucket: bucket, PathStyle: true, CredentialProvider: "seaweedfs-iam"},
+		map[string]string{s3.CredAccessKeyID: env.adminAccess, s3.CredSecretAccessKey: env.adminSecret})
+	// Mint deliberately left nil: the default, real s3.Config.MintScopedCredential must
+	// run, not a fake, or this would just be re-testing the handler's own plumbing again.
+	return NewHandler(Deps{Credential: testCredential, Registry: reg, Leases: seaweedfslease.NewMemoryStore()})
+}
+
+// assertBareKeyIssued is the one assertion all three shapes share: a real, non-empty
+// access key/secret pair, and never a session token (seaweedfs-iam has no such shape).
+func assertBareKeyIssued(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body)
+	}
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var cred map[string]any
+	_ = json.Unmarshal(resp["credential"], &cred)
+	if s, _ := cred["accessKeyId"].(string); s == "" {
+		t.Errorf("credential = %+v, want a real accessKeyId", cred)
+	}
+	if s, _ := cred["secretAccessKey"].(string); s == "" {
+		t.Errorf("credential = %+v, want a real secretAccessKey", cred)
+	}
+	if _, ok := cred["sessionToken"]; ok {
+		t.Errorf("credential has a sessionToken (%+v) — seaweedfs-iam never issues one", cred)
+	}
+}
+
+// Spark's planner: options.sessionToken "allowed".
+func TestProvider_SeaweedFSIAM_SparkPlannerShape_SessionTokenAllowed(t *testing.T) {
+	env := requireSeaweedFS(t)
+	bucket := env.newBucket(t)
+	h := newSeaweedFSProviderHandler(t, env, "spark", bucket)
+	rec := doRequest(t, h, testCredential, seaweedfsRequestBody("spark", map[string]string{"sessionToken": "allowed"}))
+	assertBareKeyIssued(t, rec)
+}
+
+// The credential sidecars: no options field at all (also "allowed", the more
+// permissive default — see s3Options' own doc comment).
+func TestProvider_SeaweedFSIAM_SidecarShape_NoOptions(t *testing.T) {
+	env := requireSeaweedFS(t)
+	bucket := env.newBucket(t)
+	h := newSeaweedFSProviderHandler(t, env, "spark", bucket)
+	rec := doRequest(t, h, testCredential, seaweedfsRequestBody("spark", nil))
+	assertBareKeyIssued(t, rec)
+}
+
+// Lakekeeper: options.sessionToken "forbidden" — already worked before the fix; kept
+// here so all three real shapes are exercised at the same level, not just two of them.
+func TestProvider_SeaweedFSIAM_LakekeeperShape_SessionTokenForbidden(t *testing.T) {
+	env := requireSeaweedFS(t)
+	bucket := env.newBucket(t)
+	h := newSeaweedFSProviderHandler(t, env, "lake", bucket)
+	rec := doRequest(t, h, testCredential, seaweedfsRequestBody("lake", map[string]string{"sessionToken": "forbidden"}))
+	assertBareKeyIssued(t, rec)
 }
