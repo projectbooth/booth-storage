@@ -65,6 +65,17 @@ services:
     # instead, then seeds the one admin identity the server boots with none of (see
     # hack/seaweedfs-seed-admin.sh) — both steps need to run after `up --wait` either way.
 
+  nats:
+    # Official nats-server image, pinned by digest (same discipline as minio/seaweedfs
+    # above). -js enables JetStream; internal/eventbus provisions the BOOTH_EVENTS
+    # stream itself in tests (ADR 0026 normally has booth-core do this in a real
+    # cluster — there is no core here to do it).
+    image: ${NATS_TEST_IMAGE:-nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927}
+    command: ["-js"]
+    ports: ["14222:4222"]
+    # No container healthcheck (the image has neither mc nor nc to probe with, same as
+    # seaweedfs above); the test harness retries its own connection instead.
+
   postgres:
     image: postgres:16-alpine
     environment:

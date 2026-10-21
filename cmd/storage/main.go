@@ -19,6 +19,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/api"
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/config"
+	"github.com/projectbooth/booth-storage/internal/eventbus"
 	"github.com/projectbooth/booth-storage/internal/registry"
 	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
 	"github.com/projectbooth/booth-storage/internal/seaweedfssweep"
@@ -66,6 +67,12 @@ func run() error {
 		return fmt.Errorf("creating OIDC verifier: %w", err)
 	}
 
+	events, closeEvents, err := openEventBus(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeEvents()
+
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: api.NewRouter(api.Deps{
@@ -75,6 +82,7 @@ func run() error {
 			MaxUploadBytes:             cfg.MaxUploadBytes,
 			SeaweedFSLeases:            leases,
 			CredentialBrokerCredential: cfg.CredentialBrokerCredential,
+			Events:                     events,
 		}),
 		// Bound how long a client may take to send headers. Deliberately no overall
 		// Read/WriteTimeout: those would cut off large object uploads and downloads.
@@ -93,6 +101,27 @@ func run() error {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
+}
+
+// openEventBus connects the storage.object.created publisher (ADR 0123). Unlike
+// openStores, an unconfigured bus is not an error: BOOTH_NATS_URL is optional, and a
+// NoopPublisher simply drops events — see config.Config.NATSURL's own doc comment on
+// why that's an acceptable default rather than a required one.
+func openEventBus(cfg config.Config) (eventbus.Publisher, func(), error) {
+	if cfg.NATSURL == "" {
+		// NewNoopPublisher itself only ever calls this once, however many Publish calls
+		// follow (internal/eventbus.NoopPublisher.warned) — nothing to dedupe here.
+		warn := func(eventType string) {
+			log.Printf("BOOTH_NATS_URL is not set; %s and later events will not be published (ADR 0123 point 6's slower trigger is the safety net)", eventType)
+		}
+		return eventbus.NewNoopPublisher(warn), func() {}, nil
+	}
+	pub, err := eventbus.Connect(cfg.NATSURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connecting to the event bus: %w", err)
+	}
+	log.Printf("publishing storage.object.created to %s", cfg.NATSURL)
+	return pub, pub.Close, nil
 }
 
 // openStores builds the metadata, credential and upload-grant stores: PostgreSQL +

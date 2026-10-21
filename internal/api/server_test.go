@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/projectbooth/booth-storage/internal/auth"
+	"github.com/projectbooth/booth-storage/internal/eventbus"
 	"github.com/projectbooth/booth-storage/internal/registry"
 	"github.com/projectbooth/booth-storage/internal/uploadgrant"
 )
@@ -73,6 +74,7 @@ func newTestEnv(t *testing.T, mutate ...func(*Deps)) *testEnv {
 		},
 		Registry: svc,
 		Grants:   grants,
+		Events:   eventbus.NewNoopPublisher(nil),
 	}
 	for _, m := range mutate {
 		m(&deps)

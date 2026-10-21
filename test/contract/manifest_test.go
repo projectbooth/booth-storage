@@ -301,6 +301,18 @@ func TestChart_WorkloadIssuer(t *testing.T) {
 	}
 }
 
+// ADR 0123: the event-bus URL is omitted entirely by default (like workloadIssuerUrl) so a
+// deployment with no bus configured publishes nothing rather than failing to connect.
+func TestChart_EventBusURL(t *testing.T) {
+	if bytes.Contains(helmTemplate(t, "templates/deployment.yaml"), []byte("BOOTH_NATS_URL")) {
+		t.Error("BOOTH_NATS_URL rendered by default; an unconfigured bus must not be assumed")
+	}
+	got := helmTemplate(t, "templates/deployment.yaml", "--set", "eventBus.url=nats://booth-nats.booth-system.svc.cluster.local:4222")
+	if !regexp.MustCompile(`BOOTH_NATS_URL\s+value: "nats://booth-nats\.booth-system\.svc\.cluster\.local:4222"`).Match(got) {
+		t.Errorf("eventBus.url not rendered:\n%s", got)
+	}
+}
+
 // The ADR 0108 key-fetch override is unconditionally rendered (like groupsClaim), empty by
 // default so ordinary discovery is unchanged, overridable per deployment.
 func TestChart_JWKSURL(t *testing.T) {

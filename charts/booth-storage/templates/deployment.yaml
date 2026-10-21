@@ -61,6 +61,10 @@ spec:
             - name: BOOTH_STORAGE_MAX_UPLOAD_BYTES
               value: {{ .Values.maxUploadBytes | int64 | quote }}
             {{- end }}
+            {{- with .Values.eventBus.url }}
+            - name: BOOTH_NATS_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.credentialBroker.enabled }}
             # ADR 0080/0088: core's own copy of this same value is what it presents as
             # `Authorization: Bearer` on every call to POST /internal/credentials. The pod may

@@ -75,6 +75,16 @@ postgres:
 credentialBroker:
   enabled: false
 
+# ADR 0123: publishes storage.object.created on the shared NATS JetStream event bus
+# (ADR 0007/0026) after a successful object write, so booth-pipeline can trigger a run
+# on new data instead of only on a cron/interval. Empty (the default) disables
+# publishing entirely — a write still succeeds, the event is just never sent, and a
+# pipeline relying on one keeps a slower cron/interval trigger as its safety net (ADR
+# 0123 point 6). Point this at the in-cluster bus booth-core stands up, e.g.
+# "nats://booth-nats.booth-system.svc.cluster.local:4222".
+eventBus:
+  url: ""
+
 # Credentials for each registered backend are stored as Kubernetes Secrets in the
 # release namespace (ADR 0020: booth-storage is the granting module). The Role below
 # grants exactly get/create/update/delete on Secrets in this one namespace, so install

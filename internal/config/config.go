@@ -50,6 +50,16 @@ type Config struct {
 	// `providesCredentials: {kinds: ["s3"]}`. Empty disables the route: every call is
 	// refused rather than trusted on an unconfigured, always-true comparison.
 	CredentialBrokerCredential string
+
+	// NATSURL is the event bus this module publishes storage.object.created onto (ADR
+	// 0123), e.g. "nats://booth-nats.booth-system.svc.cluster.local:4222". Empty — the
+	// default, and always true for BOOTH_STORAGE_DEV_MEMORY — disables publishing: a
+	// write still succeeds, the event is just never sent (see internal/eventbus.NoopPublisher).
+	// Unlike CredentialBrokerCredential, there is a meaningful "unconfigured, so skip"
+	// state here, because nothing downstream depends on this event for correctness —
+	// ADR 0123 point 6 names a slower cron/interval trigger as the safety net for a
+	// missed one.
+	NATSURL string
 }
 
 // Load reads configuration from the environment.
@@ -61,6 +71,7 @@ func Load() (Config, error) {
 		FilesystemRoots:            splitNonEmpty(os.Getenv("BOOTH_STORAGE_FILESYSTEM_ROOTS")),
 		DevMemory:                  os.Getenv("BOOTH_STORAGE_DEV_MEMORY") == "true",
 		CredentialBrokerCredential: os.Getenv("BOOTH_CREDENTIAL_BROKER_CREDENTIAL"),
+		NATSURL:                    os.Getenv("BOOTH_NATS_URL"),
 		OIDC: auth.OIDCConfig{
 			IssuerURL:       os.Getenv("BOOTH_OIDC_ISSUER_URL"),
 			ClientID:        os.Getenv("BOOTH_OIDC_CLIENT_ID"),
