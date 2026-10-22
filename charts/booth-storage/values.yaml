@@ -75,14 +75,37 @@ postgres:
 credentialBroker:
   enabled: false
 
-# ADR 0123: publishes storage.object.created on the shared NATS JetStream event bus
-# (ADR 0007/0026) after a successful object write, so booth-pipeline can trigger a run
-# on new data instead of only on a cron/interval. Empty (the default) disables
-# publishing entirely — a write still succeeds, the event is just never sent, and a
-# pipeline relying on one keeps a slower cron/interval trigger as its safety net (ADR
-# 0123 point 6). Point this at the in-cluster bus booth-core stands up, e.g.
-# "nats://booth-nats.booth-system.svc.cluster.local:4222".
+# ADR 0123 (Revision, 2026-10-21): publishes storage.object.created on the shared NATS
+# JetStream event bus after a successful object write, so booth-pipeline can trigger a
+# run on new data instead of only on a cron/interval. The BoothModule declares
+# `events: {publish: [storage.object.created]}`, and booth-core answers by writing the
+# booth-event-bus-credentials Secret (a credential scoped to exactly that, plus the
+# bus's in-cluster URL) into this namespace and admitting the namespace to NATS — the
+# same mechanism booth-api uses for api.write.committed (ADR 0050).
+#
+# Unlike booth-api's own wiring, this module never gates its own startup or writes on
+# that Secret existing: it's mounted `optional: true`, and internal/eventbus polls the
+# mount for both files and connects lazily, in the background, the first time they're
+# both there — no restart needed if this pod started before core provisioned the
+# credential, or if the Secret's provider is briefly unavailable. Until connected, a
+# write still succeeds and the event is just never sent; a pipeline relying on one keeps
+# a slower cron/interval trigger as its safety net (ADR 0123 point 6).
 eventBus:
+  # false leaves the bus out entirely: no `events` on the manifest, no mount, no
+  # connection attempt ever made. Writes still work; no pipeline is ever triggered by one.
+  enabled: true
+  credentialsSecret:
+    # Read the credential from booth-core's Secret (the normal case). Set false only
+    # against a bus with authentication off (e.g. a local test stand-in), and then
+    # nats.url is required.
+    enabled: true
+    # The name booth-core gives it (ADR 0050) — same Secret, same keys ("url",
+    # "nats.creds"), as booth-api's own eventBus.credentialsSecret.name.
+    name: booth-event-bus-credentials
+
+nats:
+  # A direct, unauthenticated bus URL, bypassing the credentials Secret entirely.
+  # Required only when eventBus.credentialsSecret.enabled is false; ignored otherwise.
   url: ""
 
 # Credentials for each registered backend are stored as Kubernetes Secrets in the

@@ -65,8 +65,8 @@ func TestObjectCreatedPublished_EditorWrite(t *testing.T) {
 	if got.Data["principal"] != "bob" {
 		t.Errorf("principal = %v, want bob", got.Data["principal"])
 	}
-	if got.Data["via"] != "editor" {
-		t.Errorf("via = %v, want editor", got.Data["via"])
+	if got.Data["via"] != "workspace-user" {
+		t.Errorf("via = %v, want workspace-user", got.Data["via"])
 	}
 	if got.Data["size"] != int64(len("a,b\n1,2\n")) {
 		t.Errorf("size = %v, want %d", got.Data["size"], len("a,b\n1,2\n"))

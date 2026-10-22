@@ -110,7 +110,10 @@ func TestNATSPublisher_PublishLandsInTheStream(t *testing.T) {
 	defer pub.Close()
 
 	subject := Subject("acme-analytics", "storage.object.created")
-	sub, err := js.SubscribeSync(subject)
+	// DeliverNew: the shared BOOTH_EVENTS stream and this exact subject persist across
+	// test runs within the same server, so a plain SubscribeSync would replay whatever
+	// an earlier test already published, not just this test's own message.
+	sub, err := js.SubscribeSync(subject, nats.DeliverNew())
 	if err != nil {
 		t.Fatalf("subscribing: %v", err)
 	}

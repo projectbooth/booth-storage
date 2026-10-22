@@ -12,6 +12,7 @@ func setEnv(t *testing.T, kv map[string]string) {
 		"BOOTH_POSTGRES_DSN", "BOOTH_NAMESPACE", "BOOTH_STORAGE_FILESYSTEM_ROOTS",
 		"BOOTH_STORAGE_MAX_UPLOAD_BYTES", "BOOTH_STORAGE_DEV_MEMORY", "BOOTH_OIDC_GROUPS_CLAIM",
 		"BOOTH_WORKLOAD_ISSUER_URL", "BOOTH_CREDENTIAL_BROKER_CREDENTIAL", "BOOTH_OIDC_JWKS_URL",
+		"BOOTH_NATS_URL", "BOOTH_EVENT_BUS_DIR",
 	} {
 		t.Setenv(k, "")
 	}
@@ -120,6 +121,34 @@ func TestLoad_Overrides(t *testing.T) {
 	}
 	if strings.Join(cfg.FilesystemRoots, "|") != `/data/{workspace}|C:\shared` {
 		t.Errorf("roots = %q; want trimmed, empties dropped, Windows drive colon preserved", cfg.FilesystemRoots)
+	}
+}
+
+func TestLoad_EventBus(t *testing.T) {
+	setEnv(t, with(map[string]string{
+		"BOOTH_NATS_URL":      "nats://test-bus:4222",
+		"BOOTH_EVENT_BUS_DIR": "/etc/booth/event-bus",
+	}))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSURL != "nats://test-bus:4222" {
+		t.Errorf("NATSURL = %q, want nats://test-bus:4222", cfg.NATSURL)
+	}
+	if cfg.EventBusDir != "/etc/booth/event-bus" {
+		t.Errorf("EventBusDir = %q, want /etc/booth/event-bus", cfg.EventBusDir)
+	}
+
+	// Neither is required: a deployment with the event bus turned off entirely sets
+	// neither, and Load must not treat that as an error (ADR 0123 point 6).
+	setEnv(t, with(map[string]string{}))
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSURL != "" || cfg.EventBusDir != "" {
+		t.Errorf("expected both empty by default, got NATSURL=%q EventBusDir=%q", cfg.NATSURL, cfg.EventBusDir)
 	}
 }
 

@@ -563,11 +563,11 @@ func (s *server) handleWriteObject(w http.ResponseWriter, r *http.Request) {
 // it early, and never surfaced to the caller — the write already succeeded, and ADR
 // 0123 point 6 names a slower cron/interval trigger as the safety net for a missed
 // event, not this module retrying or queuing one. via distinguishes an app's
-// grant-admitted create-only upload from an editor/owner write; this handler has no way
-// to further tell a UI click from a scripted API call using the same token (see
-// docs/design-event-triggers.md §2, open question 1).
+// grant-admitted create-only upload from an ordinary editor/owner write
+// ("workspace-user", the ADR's Revision section) — this handler has no way to further
+// tell a UI click from a scripted API call using the same token.
 func (s *server) publishObjectCreated(id auth.Identity, backendID, path string, size int64, viaGrant bool) {
-	via := "editor"
+	via := "workspace-user"
 	if viaGrant {
 		via = "app-upload"
 	}

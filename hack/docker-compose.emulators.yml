@@ -9,6 +9,11 @@
 #   docker compose -f hack/docker-compose.emulators.yml down -v
 #
 # GCS needs no container: its tests use fake-gcs-server in-process.
+#
+# Named explicitly: the default project name is derived from this file's directory
+# ("hack"), which collides with sibling booth-* repos' own hack/ compose files when
+# several are checked out and run locally at once.
+name: booth-storage-test
 services:
   minio:
     # ADR 0087/0091: quay.io/minio/minio refuses anonymous pulls entirely now (verified
@@ -72,7 +77,11 @@ services:
     # cluster — there is no core here to do it).
     image: ${NATS_TEST_IMAGE:-nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927}
     command: ["-js"]
-    ports: ["14222:4222"]
+    # 19422, not the more obvious 14222: a sibling repo's own test stack (booth-pipeline)
+    # already binds that port on a developer machine with several booth-* repos checked
+    # out, even under a distinct compose project name — the collision is the host port,
+    # not the project (see this file's own `name:` above for that one).
+    ports: ["19422:4222"]
     # No container healthcheck (the image has neither mc nor nc to probe with, same as
     # seaweedfs above); the test harness retries its own connection instead.
 

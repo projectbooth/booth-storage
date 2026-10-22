@@ -51,15 +51,24 @@ type Config struct {
 	// refused rather than trusted on an unconfigured, always-true comparison.
 	CredentialBrokerCredential string
 
-	// NATSURL is the event bus this module publishes storage.object.created onto (ADR
-	// 0123), e.g. "nats://booth-nats.booth-system.svc.cluster.local:4222". Empty — the
-	// default, and always true for BOOTH_STORAGE_DEV_MEMORY — disables publishing: a
-	// write still succeeds, the event is just never sent (see internal/eventbus.NoopPublisher).
-	// Unlike CredentialBrokerCredential, there is a meaningful "unconfigured, so skip"
-	// state here, because nothing downstream depends on this event for correctness —
-	// ADR 0123 point 6 names a slower cron/interval trigger as the safety net for a
-	// missed one.
+	// NATSURL is a direct, unauthenticated event-bus URL — a local test stand-in, or
+	// eventBus.credentialsSecret.enabled: false. Never the real platform bus, which
+	// always authenticates (see EventBusDir). Takes precedence over EventBusDir if both
+	// are somehow set.
 	NATSURL string
+
+	// EventBusDir is the directory booth-core's event-bus credentials Secret is mounted
+	// under (ADR 0050's booth-event-bus-credentials, mounted optional — see
+	// charts/booth-storage/values.yaml's eventBus block), holding "url" and
+	// "nats.creds". Empty disables publishing until BOOTH_STORAGE_DEV_MEMORY or the
+	// chart turns eventBus off entirely. Unlike CredentialBrokerCredential, there is a
+	// meaningful "unconfigured (yet), so skip for now" state here: nothing downstream
+	// depends on this event for correctness (ADR 0123 point 6 names a slower
+	// cron/interval trigger as the safety net for a missed one), so
+	// internal/eventbus.LazyPublisher polls this directory and connects lazily rather
+	// than this module gating its own startup on it, the way booth-api's own ADR 0123
+	// wiring of the same Secret does.
+	EventBusDir string
 }
 
 // Load reads configuration from the environment.
@@ -72,6 +81,7 @@ func Load() (Config, error) {
 		DevMemory:                  os.Getenv("BOOTH_STORAGE_DEV_MEMORY") == "true",
 		CredentialBrokerCredential: os.Getenv("BOOTH_CREDENTIAL_BROKER_CREDENTIAL"),
 		NATSURL:                    os.Getenv("BOOTH_NATS_URL"),
+		EventBusDir:                os.Getenv("BOOTH_EVENT_BUS_DIR"),
 		OIDC: auth.OIDCConfig{
 			IssuerURL:       os.Getenv("BOOTH_OIDC_ISSUER_URL"),
 			ClientID:        os.Getenv("BOOTH_OIDC_CLIENT_ID"),

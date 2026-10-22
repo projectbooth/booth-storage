@@ -42,6 +42,9 @@ type boothModule struct {
 		ProvidesCredentials *struct {
 			Kinds []string `yaml:"kinds"`
 		} `yaml:"providesCredentials"`
+		Events *struct {
+			Publish []string `yaml:"publish"`
+		} `yaml:"events"`
 		ServiceRef struct {
 			Name string `yaml:"name"`
 			Port int    `yaml:"port"`
@@ -301,15 +304,63 @@ func TestChart_WorkloadIssuer(t *testing.T) {
 	}
 }
 
-// ADR 0123: the event-bus URL is omitted entirely by default (like workloadIssuerUrl) so a
-// deployment with no bus configured publishes nothing rather than failing to connect.
-func TestChart_EventBusURL(t *testing.T) {
-	if bytes.Contains(helmTemplate(t, "templates/deployment.yaml"), []byte("BOOTH_NATS_URL")) {
-		t.Error("BOOTH_NATS_URL rendered by default; an unconfigured bus must not be assumed")
+// ADR 0123/0050: the manifest declares events.publish whenever eventBus.enabled (the
+// default), regardless of how the credential is sourced, matching booth-api's own
+// `events: {publish: [api.write.committed]}`.
+func TestChart_EventsManifest(t *testing.T) {
+	m := renderBoothModule(t)
+	if m.Spec.Events == nil || len(m.Spec.Events.Publish) != 1 || m.Spec.Events.Publish[0] != "storage.object.created" {
+		t.Errorf("spec.events = %+v, want publish: [storage.object.created] by default", m.Spec.Events)
 	}
-	got := helmTemplate(t, "templates/deployment.yaml", "--set", "eventBus.url=nats://booth-nats.booth-system.svc.cluster.local:4222")
-	if !regexp.MustCompile(`BOOTH_NATS_URL\s+value: "nats://booth-nats\.booth-system\.svc\.cluster\.local:4222"`).Match(got) {
-		t.Errorf("eventBus.url not rendered:\n%s", got)
+
+	out := helmTemplate(t, "templates/boothmodule.yaml", "--set", "eventBus.enabled=false")
+	var disabled boothModule
+	if err := yaml.Unmarshal(out, &disabled); err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	if disabled.Spec.Events != nil {
+		t.Errorf("spec.events = %+v, want nil when eventBus.enabled=false", disabled.Spec.Events)
+	}
+}
+
+// ADR 0123/0050: by default, this module mounts booth-core's event-bus credentials
+// Secret optionally and connects lazily (internal/eventbus.LazyPublisher) — it must
+// never gate startup the way booth-api's own wiring of the same Secret does.
+func TestChart_EventBusCredentialsSecretMountIsOptional(t *testing.T) {
+	got := helmTemplate(t, "templates/deployment.yaml")
+	if !bytes.Contains(got, []byte("BOOTH_EVENT_BUS_DIR")) {
+		t.Fatal("BOOTH_EVENT_BUS_DIR not rendered by default")
+	}
+	if !bytes.Contains(got, []byte("optional: true")) {
+		t.Error("the event-bus-credentials Secret volume must be mounted optional: true")
+	}
+	if !regexp.MustCompile(`secretName:\s*booth-event-bus-credentials`).Match(got) {
+		t.Errorf("secretName not rendered:\n%s", got)
+	}
+	if bytes.Contains(got, []byte("BOOTH_NATS_URL")) {
+		t.Error("BOOTH_NATS_URL should not be rendered when sourcing from the credentials Secret (the default)")
+	}
+}
+
+// Disabling the credentials Secret falls back to a direct, required URL — for a bus
+// with authentication off, matching booth-api's own escape hatch.
+func TestChart_EventBusCredentialsSecretDisabledUsesDirectURL(t *testing.T) {
+	got := helmTemplate(t, "templates/deployment.yaml", "--set", "eventBus.credentialsSecret.enabled=false", "--set", "nats.url=nats://test-bus:4222")
+	if !regexp.MustCompile(`BOOTH_NATS_URL\s+value: "nats://test-bus:4222"`).Match(got) {
+		t.Errorf("nats.url override not rendered:\n%s", got)
+	}
+	if bytes.Contains(got, []byte("BOOTH_EVENT_BUS_DIR")) || bytes.Contains(got, []byte("event-bus-credentials")) {
+		t.Error("the credentials Secret mount should not be rendered when credentialsSecret.enabled=false")
+	}
+}
+
+// eventBus.enabled=false must leave no trace: no manifest declaration, no env var, no mount.
+func TestChart_EventBusDisabled(t *testing.T) {
+	got := helmTemplate(t, "templates/deployment.yaml", "--set", "eventBus.enabled=false")
+	for _, s := range []string{"BOOTH_EVENT_BUS_DIR", "BOOTH_NATS_URL", "event-bus-credentials"} {
+		if bytes.Contains(got, []byte(s)) {
+			t.Errorf("%s rendered with eventBus.enabled=false; want no trace", s)
+		}
 	}
 }
 

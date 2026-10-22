@@ -51,11 +51,25 @@ type NATSPublisher struct {
 	nc *nats.Conn
 }
 
-// Connect dials url and returns a ready NATSPublisher. Reconnection after the initial
-// dial is nats.go's own built-in behavior (unbounded retries); Connect itself only fails
-// fast if the first dial can't succeed at all.
+// Connect dials url with no credentials and returns a ready NATSPublisher. For a bus
+// with authentication off — a local test stand-in, or eventBus.credentialsSecret.enabled:
+// false (see charts/booth-storage/values.yaml) — never for the real platform bus, which
+// always requires ConnectWithCreds.
 func Connect(url string) (*NATSPublisher, error) {
-	nc, err := nats.Connect(url, nats.Timeout(5*time.Second), nats.MaxReconnects(-1))
+	return connect(url)
+}
+
+// ConnectWithCreds dials url authenticating with the NATS credentials file booth-core
+// writes (ADR 0050's booth-event-bus-credentials Secret, key "nats.creds").
+func ConnectWithCreds(url, credsFile string) (*NATSPublisher, error) {
+	return connect(url, nats.UserCredentials(credsFile))
+}
+
+// Reconnection after the initial dial is nats.go's own built-in behavior (unbounded
+// retries); connect itself only fails fast if the first dial can't succeed at all.
+func connect(url string, opts ...nats.Option) (*NATSPublisher, error) {
+	opts = append([]nats.Option{nats.Timeout(5 * time.Second), nats.MaxReconnects(-1)}, opts...)
+	nc, err := nats.Connect(url, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS at %q: %w", url, err)
 	}

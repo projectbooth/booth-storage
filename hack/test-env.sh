@@ -10,5 +10,5 @@ export BOOTH_TEST_POSTGRES_DSN=postgres://booth:booth-test@127.0.0.1:15432/booth
 export BOOTH_TEST_SEAWEEDFS_ENDPOINT=http://127.0.0.1:19333
 export BOOTH_TEST_SEAWEEDFS_ADMIN_ACCESS_KEY=booth-test
 export BOOTH_TEST_SEAWEEDFS_ADMIN_SECRET_KEY=booth-test-secret-iam
-export BOOTH_TEST_NATS_URL=nats://127.0.0.1:14222
+export BOOTH_TEST_NATS_URL=nats://127.0.0.1:19422
 VARS
