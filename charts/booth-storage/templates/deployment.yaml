@@ -61,6 +61,19 @@ spec:
             - name: BOOTH_STORAGE_MAX_UPLOAD_BYTES
               value: {{ .Values.maxUploadBytes | int64 | quote }}
             {{- end }}
+            {{- if .Values.eventBus.enabled }}
+            {{- if .Values.eventBus.credentialsSecret.enabled }}
+            # ADR 0123/0050: this module polls this directory and connects once both files
+            # are there (internal/eventbus.LazyPublisher) — deliberately not required at
+            # startup, unlike booth-api's own ADR 0123 wiring, so a pod that comes up before
+            # core has provisioned the credential still starts and serves writes normally.
+            - name: BOOTH_EVENT_BUS_DIR
+              value: /etc/booth/event-bus
+            {{- else }}
+            - name: BOOTH_NATS_URL
+              value: {{ required "nats.url is required when eventBus.credentialsSecret.enabled is false: with no credentials Secret to take the address from, the event bus has nowhere to connect (set eventBus.enabled=false to leave the event bus out on purpose)" .Values.nats.url | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.credentialBroker.enabled }}
             # ADR 0080/0088: core's own copy of this same value is what it presents as
             # `Authorization: Bearer` on every call to POST /internal/credentials. The pod may
@@ -84,11 +97,37 @@ spec:
               port: http
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.filesystem.volumeMounts }}
+          {{- $busCreds := and .Values.eventBus.enabled .Values.eventBus.credentialsSecret.enabled }}
+          {{- if or .Values.filesystem.volumeMounts $busCreds }}
           volumeMounts:
+            {{- with .Values.filesystem.volumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if $busCreds }}
+            # A directory mount, deliberately not a single-file (sub-path) mount: the
+            # kubelet updates a mounted Secret in place when core writes or renews the
+            # credential, but never a sub-path one — exactly what lets the lazy connect
+            # above pick it up with no pod restart.
+            - name: event-bus-credentials
+              mountPath: /etc/booth/event-bus
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- with .Values.filesystem.volumes }}
+      {{- if or .Values.filesystem.volumes $busCreds }}
       volumes:
+        {{- with .Values.filesystem.volumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if $busCreds }}
+        - name: event-bus-credentials
+          secret:
+            secretName: {{ .Values.eventBus.credentialsSecret.name }}
+            # Unlike booth-api's own mount of this same Secret: optional, so a pod started
+            # before core has provisioned the credential (or an install that never turns
+            # the event bus on at the core level) mounts an empty directory instead of
+            # sitting in CreateContainerConfigError. No `items` allowlist, so whichever of
+            # "url"/"nats.creds" core has written so far shows up — never an error for one
+            # key present without the other.
+            optional: true
+        {{- end }}
       {{- end }}

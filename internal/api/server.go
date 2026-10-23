@@ -34,6 +34,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/backend"
 	"github.com/projectbooth/booth-storage/internal/credentialbroker"
+	"github.com/projectbooth/booth-storage/internal/eventbus"
 	"github.com/projectbooth/booth-storage/internal/registry"
 	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
 	"github.com/projectbooth/booth-storage/internal/uploadgrant"
@@ -62,6 +63,10 @@ type Deps struct {
 	// internal/credentialbroker) — the route is always mounted, but empty means every call
 	// is refused: there is no meaningful "unconfigured, so allow" state for it.
 	CredentialBrokerCredential string
+	// Events publishes storage.object.created after a successful object write (ADR
+	// 0123). Required (never nil): cmd/storage/main.go supplies eventbus.NewNoopPublisher
+	// when no bus is configured, so this field is never the zero value in practice.
+	Events eventbus.Publisher
 }
 
 func NewRouter(deps Deps) http.Handler {
@@ -548,7 +553,36 @@ func (s *server) handleWriteObject(w http.ResponseWriter, r *http.Request) {
 	if grant != nil {
 		log.Printf("audit: app upload workspace=%s backend=%s path=%q principal=%s grant=%s size=%d", id.Workspace, backendID, clean, id.Subject, grant.ID, info.Size)
 	}
+	s.publishObjectCreated(id, backendID, clean, info.Size, grant != nil)
 	writeJSON(w, http.StatusOK, info)
+}
+
+// publishObjectCreated sends storage.object.created (ADR 0123) after a write this
+// handler has already committed successfully. Best-effort: bounded by its own timeout,
+// detached from the request context so a client that's already moved on can't cancel
+// it early, and never surfaced to the caller — the write already succeeded, and ADR
+// 0123 point 6 names a slower cron/interval trigger as the safety net for a missed
+// event, not this module retrying or queuing one. via distinguishes an app's
+// grant-admitted create-only upload from an ordinary editor/owner write
+// ("workspace-user", the ADR's Revision section) — this handler has no way to further
+// tell a UI click from a scripted API call using the same token.
+func (s *server) publishObjectCreated(id auth.Identity, backendID, path string, size int64, viaGrant bool) {
+	via := "workspace-user"
+	if viaGrant {
+		via = "app-upload"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), eventbus.PublishTimeout)
+	defer cancel()
+	data := map[string]any{
+		"backendId": backendID,
+		"path":      path,
+		"size":      size,
+		"principal": id.Subject,
+		"via":       via,
+	}
+	if err := s.Events.Publish(ctx, id.Workspace, "storage.object.created", data); err != nil {
+		log.Printf("eventbus: publishing storage.object.created failed workspace=%s backend=%s path=%q: %v", id.Workspace, backendID, path, err)
+	}
 }
 
 // ---- folder operations and mutations (ADR 0038) ----

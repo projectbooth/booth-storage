@@ -43,6 +43,15 @@ spec:
     kinds:
       - s3
   {{- end }}
+  {{- if .Values.eventBus.enabled }}
+  # ADR 0123/0050: declaring this is what makes core mint a bus credential scoped to
+  # exactly this event type, in any workspace, and nothing else, and deliver it as the
+  # booth-event-bus-credentials Secret. See values.yaml's eventBus block for why this
+  # module never gates on that Secret actually existing.
+  events:
+    publish:
+      - storage.object.created
+  {{- end }}
   serviceRef:
     name: {{ include "booth-storage.fullname" . }}
     port: {{ .Values.service.port }}

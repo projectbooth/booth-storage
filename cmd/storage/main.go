@@ -19,6 +19,7 @@ import (
 	"github.com/projectbooth/booth-storage/internal/api"
 	"github.com/projectbooth/booth-storage/internal/auth"
 	"github.com/projectbooth/booth-storage/internal/config"
+	"github.com/projectbooth/booth-storage/internal/eventbus"
 	"github.com/projectbooth/booth-storage/internal/registry"
 	"github.com/projectbooth/booth-storage/internal/seaweedfslease"
 	"github.com/projectbooth/booth-storage/internal/seaweedfssweep"
@@ -66,6 +67,12 @@ func run() error {
 		return fmt.Errorf("creating OIDC verifier: %w", err)
 	}
 
+	events, closeEvents, err := openEventBus(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer closeEvents()
+
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: api.NewRouter(api.Deps{
@@ -75,6 +82,7 @@ func run() error {
 			MaxUploadBytes:             cfg.MaxUploadBytes,
 			SeaweedFSLeases:            leases,
 			CredentialBrokerCredential: cfg.CredentialBrokerCredential,
+			Events:                     events,
 		}),
 		// Bound how long a client may take to send headers. Deliberately no overall
 		// Read/WriteTimeout: those would cut off large object uploads and downloads.
@@ -93,6 +101,41 @@ func run() error {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
+}
+
+// eventBusPollInterval is how often a LazyPublisher checks whether booth-core has
+// written the event-bus credentials Secret yet (ADR 0050), once at startup it hadn't.
+const eventBusPollInterval = 30 * time.Second
+
+// openEventBus connects the storage.object.created publisher (ADR 0123). Unlike
+// openStores, an unconfigured or not-yet-available bus is never an error: this module
+// never gates its own startup or writes on it, unlike booth-api's own ADR 0123 wiring
+// of the same credentials Secret — see config.Config.EventBusDir's own doc comment.
+func openEventBus(ctx context.Context, cfg config.Config) (eventbus.Publisher, func(), error) {
+	// NewNoopPublisher (reached by any of the three branches below until connected)
+	// only ever calls this once however many Publish calls follow
+	// (internal/eventbus.NoopPublisher.warned) — nothing to dedupe here.
+	warn := func(eventType string) {
+		log.Printf("event bus not connected; %s and later events will not be published until it is (ADR 0123 point 6's slower trigger is the safety net)", eventType)
+	}
+	switch {
+	case cfg.NATSURL != "":
+		// A direct, unauthenticated bus — a local test stand-in, or
+		// eventBus.credentialsSecret.enabled: false. Required to connect immediately:
+		// an operator who set this explicitly gets a loud failure, not a silent retry.
+		pub, err := eventbus.Connect(cfg.NATSURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("connecting to the event bus: %w", err)
+		}
+		log.Printf("publishing storage.object.created to %s", cfg.NATSURL)
+		return pub, pub.Close, nil
+	case cfg.EventBusDir != "":
+		lp := eventbus.NewLazyPublisher(cfg.EventBusDir, warn)
+		go lp.Run(ctx, eventBusPollInterval)
+		return lp, lp.Close, nil
+	default:
+		return eventbus.NewNoopPublisher(warn), func() {}, nil
+	}
 }
 
 // openStores builds the metadata, credential and upload-grant stores: PostgreSQL +
